@@ -1,0 +1,27 @@
+# AEGIS configuration.
+# All tunables live here. Secrets never do — those live in .env (gitignored).
+
+watchlist:
+  - SPY
+  - QQQ
+  - AAPL
+  - NVDA
+  - MSFT
+
+cache:
+  ttl_seconds:
+    quotes: 5
+    chains: 30
+    news: 60
+
+bars:
+  timeframe: 1Day     # <amount><Min|Hour|Day|Week|Month>; amounts: Min 1-59, Hour 1-23, Day/Week 1, Month 1/2/3/6/12
+  lookback_days: 30
+
+# Placeholders enforced by the Phase 5 policy engine. Nothing reads these yet;
+# they are declared from day one so risk limits are versioned config, not code.
+risk_limits:
+  max_position_pct: 5.0        # max % of equity in any single position
+  max_open_positions: 5
+  daily_loss_limit_pct: 2.0    # halt for the day past this drawdown
+  no_trade_list: []            # symbols the policy engine must never trade

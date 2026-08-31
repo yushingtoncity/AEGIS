@@ -1,0 +1,16 @@
+# Secrets — never commit
+.env
+
+# Virtual environment
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Local databases (Phase 3 persistence)
+*.db
+
+# Tooling
+.pytest_cache/
