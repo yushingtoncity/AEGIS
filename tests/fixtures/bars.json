@@ -1,0 +1,38 @@
+{
+  "symbol": "SPY",
+  "bars": [
+    {
+      "symbol": "SPY",
+      "timestamp": "2026-07-28T04:00:00+00:00",
+      "open": 630.1,
+      "high": 634.9,
+      "low": 629.5,
+      "close": 633.2,
+      "volume": 51234567.0,
+      "trade_count": 412345.0,
+      "vwap": 632.11
+    },
+    {
+      "symbol": "SPY",
+      "timestamp": "2026-07-29T04:00:00+00:00",
+      "open": 633.4,
+      "high": 636.2,
+      "low": 632.8,
+      "close": 635.7,
+      "volume": 48120933.0,
+      "trade_count": 398211.0,
+      "vwap": 634.9
+    },
+    {
+      "symbol": "SPY",
+      "timestamp": "2026-07-30T04:00:00+00:00",
+      "open": 635.9,
+      "high": 637.5,
+      "low": 634.1,
+      "close": 636.4,
+      "volume": 50022145.0,
+      "trade_count": null,
+      "vwap": null
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "quote": {
+    "symbol": "SPY",
+    "timestamp": "2026-07-30T23:59:59+00:00",
+    "bid_price": 0.0,
+    "bid_size": 0.0,
+    "ask_price": 0.0,
+    "ask_size": 0.0
+  },
+  "trade": {
+    "symbol": "SPY",
+    "timestamp": "2026-07-30T23:58:11+00:00",
+    "price": 636.9,
+    "size": 25
+  }
+}

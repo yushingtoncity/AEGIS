@@ -1,0 +1,30 @@
+{
+  "news": [
+    {
+      "id": 43107442,
+      "headline": "Fed Holds Rates Steady, Signals Patience On Cuts",
+      "author": "Alex Reporter",
+      "created_at": "2026-07-29T18:05:00Z",
+      "updated_at": "2026-07-29T18:06:30Z",
+      "summary": "The Federal Reserve left its benchmark rate unchanged.",
+      "content": "",
+      "source": "benzinga",
+      "symbols": ["SPY", "QQQ"],
+      "url": "https://www.benzinga.com/example/fed-holds",
+      "images": []
+    },
+    {
+      "id": 43107981,
+      "headline": "Chipmakers Rally On Data-Center Demand",
+      "author": "Sam Writer",
+      "created_at": "2026-07-30T13:12:00Z",
+      "updated_at": "2026-07-30T13:12:00Z",
+      "summary": "",
+      "content": "",
+      "source": "benzinga",
+      "symbols": ["NVDA"],
+      "url": null,
+      "images": []
+    }
+  ]
+}

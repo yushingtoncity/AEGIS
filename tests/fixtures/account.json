@@ -1,0 +1,35 @@
+{
+  "account": {
+    "id": "3e5ff063-9db5-4f8a-9a91-0c5dcb2c0f01",
+    "account_number": "PA3ABCD12345",
+    "status": "ACTIVE",
+    "crypto_status": "ACTIVE",
+    "currency": "USD",
+    "buying_power": "200000.00",
+    "cash": "25000.50",
+    "portfolio_value": "100000.00",
+    "equity": "100000.00",
+    "last_equity": "99251.10",
+    "pattern_day_trader": false,
+    "trading_blocked": false,
+    "daytrade_count": 0
+  },
+  "positions": [
+    {
+      "asset_id": "b0b6dd9d-8b9b-48a9-ba46-b9d54906e415",
+      "symbol": "AAPL",
+      "exchange": "NASDAQ",
+      "asset_class": "us_equity",
+      "avg_entry_price": "210.15",
+      "qty": "10",
+      "side": "long",
+      "market_value": "2150.10",
+      "cost_basis": "2101.50",
+      "unrealized_pl": "48.60",
+      "unrealized_plpc": "0.0231",
+      "current_price": "215.01",
+      "lastday_price": "213.90",
+      "change_today": "0.0052"
+    }
+  ]
+}

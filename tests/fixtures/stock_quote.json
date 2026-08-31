@@ -1,0 +1,24 @@
+{
+  "quote": {
+    "symbol": "SPY",
+    "timestamp": "2026-07-30T19:59:59.123456+00:00",
+    "bid_price": 636.4,
+    "bid_size": 3.0,
+    "bid_exchange": "V",
+    "ask_price": 636.44,
+    "ask_size": 5.0,
+    "ask_exchange": "V",
+    "conditions": ["R"],
+    "tape": "B"
+  },
+  "trade": {
+    "symbol": "SPY",
+    "timestamp": "2026-07-30T19:59:58+00:00",
+    "price": 636.42,
+    "size": 100,
+    "exchange": "V",
+    "id": 52983525029262,
+    "conditions": ["@"],
+    "tape": "B"
+  }
+}

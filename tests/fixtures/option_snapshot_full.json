@@ -1,0 +1,25 @@
+{
+  "symbol": "SPY260821C00640000",
+  "latest_quote": {
+    "symbol": "SPY260821C00640000",
+    "timestamp": "2026-07-30T19:44:59+00:00",
+    "bid_price": 12.05,
+    "bid_size": 18.0,
+    "ask_price": 12.35,
+    "ask_size": 22.0
+  },
+  "latest_trade": {
+    "symbol": "SPY260821C00640000",
+    "timestamp": "2026-07-30T19:40:11+00:00",
+    "price": 12.2,
+    "size": 2.0
+  },
+  "implied_volatility": 0.1845,
+  "greeks": {
+    "delta": 0.5321,
+    "gamma": 0.0123,
+    "rho": 0.21,
+    "theta": -0.0891,
+    "vega": 0.7421
+  }
+}
