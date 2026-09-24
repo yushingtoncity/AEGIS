@@ -1,0 +1,91 @@
+{
+  "proposal": {
+    "id": "prop-0001",
+    "created_at": "2026-07-30T14:05:00+00:00",
+    "cycle_id": "cycle-0001",
+    "symbol": "SPY260821C00640000",
+    "instrument": "option",
+    "side": "buy",
+    "quantity": 2,
+    "order_type": "limit",
+    "limit_price": 12.2,
+    "thesis": "SYNTHETIC TEST DATA. SPY is holding above its 20-day average after the Fed pause with implied vol near the bottom of its 3-month range, so a long Aug-21 640 call is a defined-risk way to lean bullish into the seasonally strong first half of August.",
+    "confidence": 0.62,
+    "invalidation": "SYNTHETIC TEST DATA. A daily close below 630 or a VIX spike above 25 before Aug 7 invalidates the thesis; exit the position.",
+    "raw_model_output": "{\"symbol\": \"SPY260821C00640000\", \"instrument\": \"option\", \"side\": \"buy\", \"quantity\": 2, \"order_type\": \"limit\", \"limit_price\": 12.2, \"confidence\": 0.62, \"thesis\": \"synthetic thesis text\", \"invalidation\": \"synthetic invalidation text\"}",
+    "model_name": "synthetic-model-v0",
+    "prompt_version": "test-prompt-1"
+  },
+  "reasoning": [
+    {
+      "id": "reas-0001-scan",
+      "proposal_id": "prop-0001",
+      "stage": "scan",
+      "created_at": "2026-07-30T14:00:00+00:00",
+      "content": "SYNTHETIC TEST DATA. Scan of the watchlist: SPY spot 636.42, 20-day average 631.10, 30-day realized vol 11.4% versus ATM implied vol 18.5%. Considered a 640/650 call vertical to cut premium but the short 650 leg quotes a 0.40 bid/ask spread; a single long 640 call fills cleaner on paper. Shortlisted SPY for a thesis pass.",
+      "tokens_in": 1200,
+      "tokens_out": 180
+    },
+    {
+      "id": "reas-0001-thesis",
+      "proposal_id": "prop-0001",
+      "stage": "thesis",
+      "created_at": "2026-07-30T14:02:00+00:00",
+      "content": "SYNTHETIC TEST DATA. Thesis: post-Fed drift higher with cheap implied vol favors owning upside. A long Aug-21 640 call costs about 12.20 mid (1.9% of spot) with delta 0.53; breakeven 652.20 at expiry, max loss the debit paid. Invalidation is a close below 630 or a VIX spike above 25.",
+      "tokens_in": 1500,
+      "tokens_out": 220
+    },
+    {
+      "id": "reas-0001-proposal",
+      "proposal_id": "prop-0001",
+      "stage": "proposal",
+      "created_at": "2026-07-30T14:04:00+00:00",
+      "content": "SYNTHETIC TEST DATA. Proposal: buy 2 SPY260821C00640000 at a 12.20 limit (2,440 USD debit, about 1.8% of equity, inside the 5% position cap). Confidence 0.62. Emitting the structured proposal JSON.",
+      "tokens_in": 1700,
+      "tokens_out": 140
+    }
+  ],
+  "decision": {
+    "id": "dec-0001",
+    "proposal_id": "prop-0001",
+    "decided_at": "2026-07-30T14:05:30+00:00",
+    "verdict": "NEEDS_APPROVAL",
+    "rules_evaluated": [
+      {"rule": "max_position_pct", "limit": 5.0, "observed": 1.8, "passed": true},
+      {"rule": "max_open_positions", "limit": 5, "observed": 2, "passed": true}
+    ],
+    "failing_rule": null,
+    "notes": "SYNTHETIC TEST DATA. All limits pass; option trades always require a human approval."
+  },
+  "approval": {
+    "id": "appr-0001",
+    "proposal_id": "prop-0001",
+    "requested_at": "2026-07-30T14:05:31+00:00",
+    "responded_at": "2026-07-30T14:07:10+00:00",
+    "response": "approved",
+    "channel": "cli",
+    "responder": "test-operator"
+  },
+  "order": {
+    "id": "ord-0001",
+    "proposal_id": "prop-0001",
+    "client_order_id": "aegis-prop-0001-1",
+    "broker": "paper",
+    "broker_order_id": "paper-order-0001",
+    "status": "filled",
+    "submitted_at": "2026-07-30T14:07:12+00:00",
+    "updated_at": "2026-07-30T14:07:20+00:00",
+    "symbol": "SPY260821C00640000",
+    "side": "buy",
+    "quantity": 2,
+    "limit_price": 12.2
+  },
+  "fill": {
+    "id": "fill-0001",
+    "order_id": "ord-0001",
+    "filled_at": "2026-07-30T14:07:19+00:00",
+    "fill_price": 12.15,
+    "fill_quantity": 2,
+    "fees": 1.3
+  }
+}
