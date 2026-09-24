@@ -1,8 +1,30 @@
-"""Phase 2 — pricing engine (stub).
+"""Phase 2 — pricing engine.
 
-Will compute our own Greeks and implied volatility (Black-Scholes /
-binomial) as the fallback when Alpaca omits them — common for near-dated,
-deep-OTM, or unquoted contracts — plus fair-value estimates the brain can
-cite in proposals. Pure functions over aegis.data models; no I/O and no
-broker access.
+Pure math over ``aegis.data`` model types: Black-Scholes prices, analytic
+Greeks, implied volatility, time-to-expiry, multi-leg position risk, and an
+``enrich`` step that puts vendor and computed values side by side. Zero
+network calls, zero broker access; every function is deterministic. See
+``black_scholes`` for the modelling assumptions (European exercise, constant
+vol and rate) and why results are approximations for American-style US
+equity options.
 """
+
+from aegis.pricing.errors import PricingError
+from aegis.pricing.models import (
+    EnrichedOption,
+    Greeks,
+    OptionLeg,
+    PositionSummary,
+    PremiumType,
+    Side,
+)
+
+__all__ = [
+    "EnrichedOption",
+    "Greeks",
+    "OptionLeg",
+    "PositionSummary",
+    "PremiumType",
+    "PricingError",
+    "Side",
+]

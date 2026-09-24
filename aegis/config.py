@@ -11,6 +11,7 @@ import os
 import re
 from functools import lru_cache
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 from dotenv import load_dotenv
@@ -73,6 +74,55 @@ class BarsConfig(BaseModel):
         return value
 
 
+class PricingConfig(BaseModel):
+    """Inputs to the Phase 2 pricing engine that a single quote cannot supply.
+
+    ``risk_free_rate`` is a placeholder until a later phase sources it from a
+    Treasury-yield feed; ``day_count_basis`` fixes the calendar-day
+    time-to-expiry convention; ``expiry_time``/``expiry_timezone`` pin the
+    instant a contract expires (the exchange close on expiration day).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    risk_free_rate: float = Field(default=0.04, ge=-0.05, le=0.5)
+    day_count_basis: int = Field(default=365, gt=0)
+    contract_multiplier: int = Field(default=100, gt=0)
+    expiry_time: str = "16:00"
+    expiry_timezone: str = "America/New_York"
+
+    @field_validator("expiry_time")
+    @classmethod
+    def _valid_clock_time(cls, value: str) -> str:
+        if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", value):
+            raise ValueError(f"invalid expiry_time {value!r}: expected HH:MM (24h)")
+        return value
+
+    @field_validator("expiry_timezone")
+    @classmethod
+    def _valid_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(f"unknown expiry_timezone {value!r}") from exc
+        return value
+
+
+class StoreConfig(BaseModel):
+    """Where the Phase 3 SQLite journal lives (relative to the repo root)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    db_path: str = "data/aegis.db"
+
+    @field_validator("db_path")
+    @classmethod
+    def _non_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("db_path must not be blank")
+        return value.strip()
+
+
 class RiskLimits(BaseModel):
     """Risk limits enforced by the Phase 5 policy engine.
 
@@ -101,6 +151,8 @@ class AegisConfig(BaseModel):
     watchlist: list[str] = Field(min_length=1)
     cache: CacheConfig = CacheConfig()
     bars: BarsConfig = BarsConfig()
+    pricing: PricingConfig = PricingConfig()
+    store: StoreConfig = StoreConfig()
     risk_limits: RiskLimits = RiskLimits()
 
     @field_validator("watchlist")

@@ -18,6 +18,25 @@ bars:
   timeframe: 1Day     # <amount><Min|Hour|Day|Week|Month>; amounts: Min 1-59, Hour 1-23, Day/Week 1, Month 1/2/3/6/12
   lookback_days: 30
 
+# Phase 2 pricing engine (aegis/pricing). Black-Scholes inputs that are not
+# observable from a single option quote.
+pricing:
+  # PLACEHOLDER. The continuously-compounded annual risk-free rate used for
+  # discounting and Greeks. It should track the short-term US Treasury yield
+  # (e.g. the 3-month T-bill) for the option's tenor; a later phase may source
+  # it from a feed. Until then, review it whenever rates move materially.
+  risk_free_rate: 0.04
+  day_count_basis: 365         # calendar days per year for time-to-expiry (calendar-day convention)
+  contract_multiplier: 100     # shares per standard US equity option contract
+  expiry_time: "16:00"         # options expire at the exchange close on expiration day...
+  expiry_timezone: America/New_York   # ...in this timezone
+
+# Phase 3 persistence (aegis/store): SQLite journal of proposals, decisions,
+# orders, fills, and snapshots. Relative paths resolve from the repo root.
+# *.db is gitignored.
+store:
+  db_path: data/aegis.db
+
 # Placeholders enforced by the Phase 5 policy engine. Nothing reads these yet;
 # they are declared from day one so risk limits are versioned config, not code.
 risk_limits:

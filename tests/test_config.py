@@ -133,3 +133,29 @@ def test_model_rejects_extra_nested_keys():
         AegisConfig.model_validate(
             {"watchlist": ["SPY"], "cache": {"ttl_seconds": {"bogus": 1}}}
         )
+
+
+def test_pricing_block_defaults(tmp_path):
+    config = load_config(write(tmp_path, MINIMAL))
+    assert config.pricing.risk_free_rate == 0.04
+    assert config.pricing.day_count_basis == 365
+    assert config.pricing.contract_multiplier == 100
+    assert config.pricing.expiry_time == "16:00"
+    assert config.pricing.expiry_timezone == "America/New_York"
+    assert config.store.db_path == "data/aegis.db"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "pricing:\n  day_count_basis: 0\n",
+        "pricing:\n  expiry_time: '25:00'\n",
+        "pricing:\n  expiry_time: '4pm'\n",
+        "pricing:\n  expiry_timezone: Mars/Olympus\n",
+        "pricing:\n  contract_multiplier: 0\n",
+        "store:\n  db_path: '   '\n",
+    ],
+)
+def test_invalid_pricing_and_store_blocks_rejected(tmp_path, text):
+    with pytest.raises(ConfigError):
+        load_config(write(tmp_path, MINIMAL + text))
