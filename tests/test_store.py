@@ -27,7 +27,9 @@ import aegis.store
 from aegis.cli import db as cli_db
 from aegis.cli import trace as cli_trace
 from aegis.config import REPO_ROOT, get_config
+from aegis.data.models import OptionType
 from aegis.store import db as store_db
+from aegis.store import models as store_models
 from aegis.store import repo
 from aegis.store.db import (
     MIGRATIONS_DIR,
@@ -60,22 +62,31 @@ from aegis.store.models import (
     PolicyDecision,
     PositionSnapshot,
     Proposal,
+    ProposalLeg,
     ProposalTrace,
     Reasoning,
     ReasoningStage,
     StoreStatus,
+    TokenUsage,
     Verdict,
     new_id,
 )
 from aegis.store.repo import (
     add_reasoning,
+    get_cycle_reasoning,
+    get_cycle_token_usage,
     get_daily_pnl,
     get_open_orders,
     get_order,
     get_proposal,
+    get_proposal_legs,
     get_proposal_trace,
     get_recent_events,
+    get_recent_proposals,
+    get_token_usage,
+    get_token_usage_by_model,
     insert_proposal,
+    link_reasoning_to_proposal,
     log_event,
     record_approval,
     record_decision,
@@ -158,6 +169,7 @@ def _schema_rows(conn):
 # table, so a wrong count query in db.py cannot vouch for itself.
 _COUNT_SQL = {
     "proposals": "SELECT COUNT(*) FROM proposals",
+    "proposal_legs": "SELECT COUNT(*) FROM proposal_legs",
     "reasoning": "SELECT COUNT(*) FROM reasoning",
     "policy_decisions": "SELECT COUNT(*) FROM policy_decisions",
     "approvals": "SELECT COUNT(*) FROM approvals",
@@ -189,6 +201,18 @@ def _bare_order(order_id, client_order_id, **overrides):
         "status": OrderStatus.FILLED, "symbol": "SPY", "side": OrderSide.BUY, "quantity": 1,
     }
     return Order(**{**fields, **overrides})
+
+
+def _legs(proposal_id, count=2):
+    """``count`` legs of an Oct-16 call vertical on ``proposal_id``: buy 640, sell 650 (660 …), by index."""
+    return [
+        ProposalLeg(
+            id=f"leg-{proposal_id}-{n}", proposal_id=proposal_id, leg_index=n, symbol=f"SPY261016C00{640 + 10 * n}000",
+            option_type=OptionType.CALL, side=OrderSide.BUY if n == 0 else OrderSide.SELL, quantity=1,
+            strike=640 + 10 * n, expiration=date(2026, 10, 16),
+        )
+        for n in range(count)
+    ]
 
 
 def _optional(annotation):
@@ -228,9 +252,9 @@ class TestConnect:
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
         assert conn.execute("PRAGMA synchronous").fetchone()[0] == 1  # NORMAL, the WAL pairing
-        assert schema_version(conn) == 1
+        assert schema_version(conn) == 2
         assert _table_names(conn) == set(TABLES) | {"schema_version"}
-        assert len(TABLES) == 9
+        assert len(TABLES) == 10
         assert conn.row_factory is sqlite3.Row
         assert conn.isolation_level is None
 
@@ -244,7 +268,7 @@ class TestConnect:
         conn = connect(":memory:")
         assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "memory"
         assert conn.execute("PRAGMA synchronous").fetchone()[0] == 1  # NORMAL
-        assert migrate(conn) == 1
+        assert migrate(conn) == 2
         assert _table_names(conn) == set(TABLES) | {"schema_version"}
         conn.close()
 
@@ -313,7 +337,9 @@ class TestConnect:
             assert proc.returncode == 0 and out.strip() == "ok", err
         conn = connect(db_path)
         assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
-        assert [row[:3] for row in _schema_rows(conn)] == [(1, 1, "0001_initial")]  # migrated once
+        assert [row[:3] for row in _schema_rows(conn)] == [  # migrated once
+            (1, 1, "0001_initial"), (2, 2, "0002_reasoning_cycles_and_legs"),
+        ]
         assert _count(conn, "events") == 40
         conn.close()
 
@@ -357,7 +383,10 @@ class TestTransaction:
 class TestMigrations:
     def test_list_migrations(self):
         listed = [(version, name, path.name) for version, name, path in list_migrations()]
-        assert listed == [(1, "0001_initial", "0001_initial.sql")]
+        assert listed == [
+            (1, "0001_initial", "0001_initial.sql"),
+            (2, "0002_reasoning_cycles_and_legs", "0002_reasoning_cycles_and_legs.sql"),
+        ]
         assert all(path.parent == MIGRATIONS_DIR for _, _, path in list_migrations())
 
     def test_initial_file_leaves_transactions_to_db_py(self):
@@ -368,17 +397,36 @@ class TestMigrations:
         assert "CREATE TABLE " not in text.replace("CREATE TABLE IF NOT EXISTS", "")
         assert "CREATE INDEX " not in text.replace("CREATE INDEX IF NOT EXISTS", "")
 
+    def test_rebuild_file_leaves_transactions_to_db_py(self):
+        """0002 rebuilds ``reasoning`` (copy, DROP, RENAME) and relies on db.py's transaction for safety."""
+        text = (MIGRATIONS_DIR / "0002_reasoning_cycles_and_legs.sql").read_text(encoding="utf-8")
+        assert text.startswith("-- migration: 0002 ")
+        assert "atomic" in text  # the header says the one transaction is what makes the rebuild safe
+        assert re.search(r"^\s*(BEGIN|COMMIT|END)\b", text, re.IGNORECASE | re.MULTILINE) is None
+        assert text.count("CREATE TABLE IF NOT EXISTS") == 2
+        assert "CREATE TABLE " not in text.replace("CREATE TABLE IF NOT EXISTS", "")
+        assert "CREATE INDEX " not in text.replace("CREATE INDEX IF NOT EXISTS", "")
+        body = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("--"))
+        statements = [" ".join(chunk.split()) for chunk in store_db._split_statements(body)]
+        assert len(statements) == 9
+        assert statements[2] == "DROP TABLE reasoning;"
+        assert statements[3] == "ALTER TABLE reasoning_v2 RENAME TO reasoning;"
+        # the multi-line copy is one statement, before the DROP, and backfills cycle_id from the proposal
+        assert statements[1].startswith("INSERT INTO reasoning_v2 (id, cycle_id, proposal_id,")
+        assert "SELECT r.id, p.cycle_id, r.proposal_id," in statements[1]
+        assert statements[1].endswith("FROM reasoning AS r LEFT JOIN proposals AS p ON p.id = r.proposal_id;")
+
     def test_applying_twice_is_a_noop(self, conn, db_path):
-        assert migrate(conn) == 1
+        assert migrate(conn) == 2
         before = _schema_rows(conn)
-        assert len(before) == 1
-        assert migrate(conn) == 1
-        assert _schema_rows(conn) == before  # the same row, byte for byte: nothing re-applied
-        assert applied_versions(conn) == {1: "0001_initial"}
-        applied_at = conn.execute("SELECT applied_at FROM schema_version").fetchone()[0]
-        assert datetime.fromisoformat(applied_at).tzinfo is not None
+        assert len(before) == 2
+        assert migrate(conn) == 2
+        assert _schema_rows(conn) == before  # the same rows, byte for byte: nothing re-applied
+        assert applied_versions(conn) == {1: "0001_initial", 2: "0002_reasoning_cycles_and_legs"}
+        for (applied_at,) in conn.execute("SELECT applied_at FROM schema_version").fetchall():
+            assert datetime.fromisoformat(applied_at).tzinfo is not None
         reopened = open_store(db_path)
-        assert schema_version(reopened) == 1
+        assert schema_version(reopened) == 2
         assert _schema_rows(reopened) == before
         reopened.close()
 
@@ -501,7 +549,7 @@ class TestMigrations:
     def test_dropped_table_is_reported_not_recreated(self, conn, db_path, capsys):
         """A recorded migration is never re-run: status and both CLIs say what is missing instead."""
         conn.execute("DROP TABLE events")
-        assert migrate(conn) == 1
+        assert migrate(conn) == 2
         assert "events" not in _table_names(conn)
         report = status(conn, db_path)
         assert report.pending_migrations == () and report.missing_tables == ("events",)
@@ -519,6 +567,75 @@ class TestMigrations:
         assert "missing tables: events" in capsys.readouterr().out
         assert "events" not in _table_names(conn)
         assert status(conn, db_path).missing_tables == ("events",)
+
+    def test_upgrading_a_v1_database_keeps_reasoning_and_adds_legs(self, db_path, trace_data):
+        """0002 rebuilds ``reasoning`` in place: every row survives with cycle_id backfilled from its proposal."""
+        conn = connect(db_path)
+        conn.execute(store_db._SCHEMA_VERSION_DDL)
+        version, name, path = list_migrations()[0]
+        store_db._apply_migration(conn, version, name, path)
+        assert schema_version(conn) == 1 and "proposal_legs" not in _table_names(conn)
+        ddl = conn.execute("SELECT sql FROM sqlite_master WHERE name = ?", ("reasoning",)).fetchone()[0]
+        assert "proposal_id TEXT NOT NULL" in ddl  # the 0001 shape
+        _insert_proposal(conn, Proposal.model_validate(trace_data["proposal"]))
+        _insert_proposal(conn, _bare_proposal("prop-0002"))
+        for n, row in enumerate(trace_data["reasoning"]):
+            conn.execute(
+                "INSERT INTO reasoning (id, proposal_id, stage, created_at, content, tokens_in, tokens_out)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (row["id"], row["proposal_id"], row["stage"], row["created_at"], row["content"], row["tokens_in"],
+                 None if n == 2 else row["tokens_out"]),
+            )
+        conn.execute(
+            "INSERT INTO reasoning (id, proposal_id, stage, created_at, content) VALUES (?, ?, ?, ?, ?)",
+            ("reas-0002", "prop-0002", "scan", AWARE.isoformat(), "other"),
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="NOT NULL"):  # the 0001 constraint 0002 lifts
+            conn.execute(
+                "INSERT INTO reasoning (id, proposal_id, stage, created_at, content) VALUES (?, NULL, ?, ?, ?)",
+                ("x", "scan", AWARE.isoformat(), "c"),
+            )
+
+        assert migrate(conn) == 2
+        assert not conn.in_transaction
+        assert applied_versions(conn) == {1: "0001_initial", 2: "0002_reasoning_cycles_and_legs"}
+        assert _table_names(conn) == set(TABLES) | {"schema_version"}  # reasoning_v2 is gone, proposal_legs is there
+        rows = conn.execute(
+            "SELECT id, cycle_id, proposal_id, stage, tokens_in, tokens_out, model_name, latency_ms"
+            " FROM reasoning ORDER BY id"
+        ).fetchall()
+        assert [tuple(row) for row in rows] == [
+            ("reas-0001-proposal", "cycle-0001", "prop-0001", "proposal", 1700, None, None, None),
+            ("reas-0001-scan", "cycle-0001", "prop-0001", "scan", 1200, 180, None, None),
+            ("reas-0001-thesis", "cycle-0001", "prop-0001", "thesis", 1500, 220, None, None),
+            ("reas-0002", "cycle-x", "prop-0002", "scan", None, None, None, None),
+        ]
+        trace = get_proposal_trace(conn, "prop-0001")
+        assert [r.stage for r in trace.reasoning] == [
+            ReasoningStage.SCAN, ReasoningStage.THESIS, ReasoningStage.PROPOSAL,
+        ]
+        assert {r.cycle_id for r in trace.reasoning} == {"cycle-0001"} and trace.legs == ()
+        assert get_cycle_reasoning(conn, "cycle-x") == [Reasoning(
+            id="reas-0002", cycle_id="cycle-x", proposal_id="prop-0002", stage=ReasoningStage.SCAN,
+            created_at=AWARE, content="other",
+        )]
+        assert get_token_usage(conn, date(2026, 7, 30)) == TokenUsage(tokens_in=4400, tokens_out=400, calls=4)
+        # the rebuilt table takes a cycle-only row, keeps the foreign key, and refuses a row under neither
+        add_reasoning(conn, Reasoning(id="reas-cycle-only", cycle_id="cycle-new", stage=ReasoningStage.SCAN, content="c"))
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            conn.execute(
+                "INSERT INTO reasoning (id, cycle_id, proposal_id, stage, created_at, content) VALUES (?, ?, ?, ?, ?, ?)",
+                ("x", "cycle-new", "no-such-proposal", "scan", AWARE.isoformat(), "c"),
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            conn.execute(
+                "INSERT INTO reasoning (id, cycle_id, proposal_id, stage, created_at, content) VALUES (?, NULL, NULL, ?, ?, ?)",
+                ("x", "scan", AWARE.isoformat(), "c"),
+            )
+        insert_proposal(conn, _bare_proposal("prop-0003"), _legs("prop-0003"))
+        assert _count(conn, "proposal_legs") == 2
+        assert status(conn, db_path).missing_tables == () and migrate(conn) == 2  # and nothing pending after
+        conn.close()
 
 
 class TestSchemaConstraints:
@@ -571,7 +688,8 @@ class TestSchemaConstraints:
         """Each CHECK lists exactly its enum's values: a too-narrow one would crash the loop."""
         enum_columns = {
             ("proposals", "instrument"): Instrument, ("proposals", "side"): OrderSide,
-            ("proposals", "order_type"): OrderType, ("reasoning", "stage"): ReasoningStage,
+            ("proposals", "order_type"): OrderType, ("proposal_legs", "option_type"): OptionType,
+            ("proposal_legs", "side"): OrderSide, ("reasoning", "stage"): ReasoningStage,
             ("policy_decisions", "verdict"): Verdict, ("approvals", "response"): ApprovalResponse,
             ("orders", "broker"): Broker, ("orders", "status"): OrderStatus, ("orders", "side"): OrderSide,
             ("events", "level"): EventLevel,
@@ -585,6 +703,13 @@ class TestSchemaConstraints:
         for field, enum in (("instrument", Instrument), ("side", OrderSide), ("order_type", OrderType)):
             for member in enum:
                 insert_proposal(conn, proposal.model_copy(update={"id": f"prop-{member.value}", field: member}))
+        insert_proposal(conn, proposal.model_copy(update={"id": "prop-legs"}), [
+            ProposalLeg(
+                proposal_id="prop-legs", leg_index=n, symbol="SPY", option_type=option_type, side=side,
+                quantity=1, strike=1, expiration=AWARE.date(),
+            )
+            for n, (option_type, side) in enumerate((t, s) for t in OptionType for s in OrderSide)
+        ])
         for stage in ReasoningStage:
             add_reasoning(conn, Reasoning(proposal_id=proposal.id, stage=stage, content="c"))
         for verdict in Verdict:
@@ -606,14 +731,18 @@ class TestSchemaConstraints:
         for level in EventLevel:
             log_event(conn, Event(level=level, kind="k", message="m"))
         assert {table: _count(conn, table) for table in TABLES} == {
-            "proposals": 7, "reasoning": 3, "policy_decisions": 4, "approvals": 3, "orders": 10,
-            "fills": 0, "position_snapshots": 0, "pnl_snapshots": 0, "events": 5,
+            "proposals": 8, "proposal_legs": 4, "reasoning": 3, "policy_decisions": 4, "approvals": 3,
+            "orders": 10, "fills": 0, "position_snapshots": 0, "pnl_snapshots": 0, "events": 5,
         }
 
         ts = AWARE.isoformat()
         rejected = (
             ("INSERT INTO reasoning (id, proposal_id, stage, created_at, content) VALUES (?, ?, ?, ?, ?)",
              ("x", proposal.id, "dream", ts, "c")),
+            ("INSERT INTO proposal_legs (id, proposal_id, leg_index, symbol, option_type, side, quantity, strike,"
+             " expiration) VALUES (?, ?, 9, 'SPY', ?, 'buy', 1, 1, ?)", ("x", proposal.id, "future", ts)),
+            ("INSERT INTO proposal_legs (id, proposal_id, leg_index, symbol, option_type, side, quantity, strike,"
+             " expiration) VALUES (?, ?, 9, 'SPY', 'call', ?, 1, 1, ?)", ("x", proposal.id, "hold", ts)),
             ("INSERT INTO policy_decisions (id, proposal_id, decided_at, verdict, rules_evaluated)"
              " VALUES (?, ?, ?, ?, ?)", ("x", proposal.id, ts, "MAYBE", "[]")),
             ("INSERT INTO approvals (id, proposal_id, requested_at, response, channel) VALUES (?, ?, ?, ?, ?)",
@@ -631,7 +760,8 @@ class TestSchemaConstraints:
         for column, bad in (("broker", "crypto"), ("status", "lost"), ("side", "hold")):
             with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
                 _insert_order(conn, order, **{column: bad})
-        assert _count(conn, "proposals") == 7 and _count(conn, "orders") == 10
+        assert _count(conn, "proposals") == 8 and _count(conn, "orders") == 10
+        assert _count(conn, "proposal_legs") == 4
 
     def test_columns_match_the_spec(self, conn):
         """Column names and declared types verbatim from the spec (and the models); ``id`` the PRIMARY KEY.
@@ -649,9 +779,15 @@ class TestSchemaConstraints:
                 ("limit_price", "REAL"), ("thesis", "TEXT"), ("confidence", "REAL"), ("invalidation", "TEXT"),
                 ("raw_model_output", "TEXT"), ("model_name", "TEXT"), ("prompt_version", "TEXT"),
             ]),
+            "proposal_legs": (ProposalLeg, [
+                ("id", "TEXT"), ("proposal_id", "TEXT"), ("leg_index", "INTEGER"), ("symbol", "TEXT"),
+                ("option_type", "TEXT"), ("side", "TEXT"), ("quantity", "REAL"), ("strike", "REAL"),
+                ("expiration", "TEXT"),
+            ]),
             "reasoning": (Reasoning, [
-                ("id", "TEXT"), ("proposal_id", "TEXT"), ("stage", "TEXT"), ("created_at", "TEXT"),
-                ("content", "TEXT"), ("tokens_in", "INTEGER"), ("tokens_out", "INTEGER"),
+                ("id", "TEXT"), ("cycle_id", "TEXT"), ("proposal_id", "TEXT"), ("stage", "TEXT"),
+                ("created_at", "TEXT"), ("content", "TEXT"), ("tokens_in", "INTEGER"), ("tokens_out", "INTEGER"),
+                ("model_name", "TEXT"), ("latency_ms", "REAL"),
             ]),
             "policy_decisions": (PolicyDecision, [
                 ("id", "TEXT"), ("proposal_id", "TEXT"), ("decided_at", "TEXT"), ("verdict", "TEXT"),
@@ -712,7 +848,10 @@ class TestSchemaConstraints:
         rows = {  # the id first, then otherwise valid values (parents exist for every FK)
             "proposals": ("INSERT INTO proposals VALUES (?, ?, 'c', 'SPY', 'equity', 'buy', 1, 'market', NULL,"
                           " 't', 0.5, 'i', '{}', 'm', 'v')", (ts,)),
-            "reasoning": ("INSERT INTO reasoning VALUES (?, 'prop-0001', 'scan', ?, 'c', NULL, NULL)", (ts,)),
+            "proposal_legs": ("INSERT INTO proposal_legs VALUES (?, 'prop-0001', 0, 'SPY', 'call', 'buy', 1, 640,"
+                              " '2026-10-16')", ()),
+            "reasoning": ("INSERT INTO reasoning VALUES (?, 'cycle-0001', 'prop-0001', 'scan', ?, 'c', NULL, NULL,"
+                          " NULL, NULL)", (ts,)),
             "policy_decisions": ("INSERT INTO policy_decisions VALUES (?, 'prop-0001', ?, 'REJECT', '[]', NULL, NULL)",
                                  (ts,)),
             "approvals": ("INSERT INTO approvals VALUES (?, 'prop-0001', ?, NULL, NULL, 'cli', NULL)", (ts,)),
@@ -733,11 +872,13 @@ class TestSchemaConstraints:
                 conn.execute(sql, (None, *params))
             conn.execute(sql, ("id-" + table, *params))  # the same row with an id is fine
         assert {table: _count(conn, table) for table in TABLES} == {
-            "proposals": 2, "reasoning": 1, "policy_decisions": 1, "approvals": 1, "orders": 2,
-            "fills": 1, "position_snapshots": 1, "pnl_snapshots": 1, "events": 1,
+            "proposals": 2, "proposal_legs": 1, "reasoning": 1, "policy_decisions": 1, "approvals": 1,
+            "orders": 2, "fills": 1, "position_snapshots": 1, "pnl_snapshots": 1, "events": 1,
         }
-        assert len(get_proposal_trace(conn, "prop-0001").fills) == 1  # and every read still maps
+        trace = get_proposal_trace(conn, "prop-0001")  # and every read still maps
+        assert len(trace.fills) == 1 and len(trace.legs) == 1 and len(trace.reasoning) == 1
         assert len(get_open_orders(conn)) == 1 and len(get_recent_events(conn)) == 1
+        assert len(get_cycle_reasoning(conn, "cycle-0001")) == 1 and len(get_recent_proposals(conn)) == 2
 
     def test_every_foreign_key_and_lookup_column_is_indexed(self, conn):
         indexed = set()
@@ -746,7 +887,10 @@ class TestSchemaConstraints:
                 columns = conn.execute("SELECT name FROM pragma_index_info(?)", (index["name"],)).fetchall()
                 indexed.add((table, columns[0]["name"]))
         expected = {
+            ("proposal_legs", "proposal_id"),
             ("reasoning", "proposal_id"),
+            ("reasoning", "cycle_id"),
+            ("reasoning", "created_at"),
             ("policy_decisions", "proposal_id"),
             ("approvals", "proposal_id"),
             ("orders", "proposal_id"),
@@ -760,6 +904,43 @@ class TestSchemaConstraints:
             ("proposals", "cycle_id"),
         }
         assert expected <= indexed
+
+    def test_proposal_legs_constraints(self, conn, trace_data):
+        """FK to the proposal, CHECKs on type/side/quantity/strike, one row per (proposal, leg_index)."""
+        _insert_proposal(conn, Proposal.model_validate(trace_data["proposal"]))
+        sql = (
+            "INSERT INTO proposal_legs (id, proposal_id, leg_index, symbol, option_type, side, quantity, strike,"
+            " expiration) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        good = ("leg-0", "prop-0001", 0, "SPY261016C00640000", "call", "buy", 1.0, 640.0, "2026-10-16")
+        for position, bad, needle in (
+            (1, "no-such-proposal", "FOREIGN KEY"), (4, "future", "CHECK"), (5, "hold", "CHECK"),
+            (6, 0.0, "CHECK"), (6, -1.0, "CHECK"), (7, 0.0, "CHECK"), (7, -640.0, "CHECK"),
+        ):
+            params = list(good)
+            params[position] = bad
+            with pytest.raises(sqlite3.IntegrityError, match=needle):
+                conn.execute(sql, params)
+        assert _count(conn, "proposal_legs") == 0
+        conn.execute(sql, good)
+        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):
+            conn.execute(sql, ("leg-dup", "prop-0001", 0, "SPY261016P00630000", "put", "sell", 1.0, 630.0, "2026-10-16"))
+        conn.execute(sql, ("leg-1", "prop-0001", 1, "SPY261016P00630000", "put", "sell", 1.0, 630.0, "2026-10-16"))
+        assert _count(conn, "proposal_legs") == 2
+
+    def test_reasoning_needs_a_cycle_or_a_proposal(self, conn, trace_data):
+        """The 0002 CHECK: a row under neither a cycle nor a proposal is refused; either alone is fine."""
+        _insert_proposal(conn, Proposal.model_validate(trace_data["proposal"]))
+        sql = "INSERT INTO reasoning (id, cycle_id, proposal_id, stage, created_at, content) VALUES (?, ?, ?, ?, ?, ?)"
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            conn.execute(sql, ("x", None, None, "scan", AWARE.isoformat(), "c"))
+        conn.execute(sql, ("cycle-only", "cycle-1", None, "scan", AWARE.isoformat(), "c"))
+        conn.execute(sql, ("proposal-only", None, "prop-0001", "scan", AWARE.isoformat(), "c"))
+        conn.execute(sql, ("both", "cycle-1", "prop-0001", "scan", AWARE.isoformat(), "c"))
+        assert _count(conn, "reasoning") == 3
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            conn.execute(sql, ("x", "cycle-1", "no-such-proposal", "scan", AWARE.isoformat(), "c"))
+        assert _count(conn, "reasoning") == 3
 
 
 class TestModels:
@@ -875,7 +1056,7 @@ class TestModels:
         proposal = Proposal.model_validate(trace_data["proposal"])
         empty = ProposalTrace(proposal=proposal)
         assert empty.decision is None and empty.approval is None
-        assert empty.reasoning == () and empty.orders == () and empty.fills == ()
+        assert empty.legs == () and empty.reasoning == () and empty.orders == () and empty.fills == ()
         first = PolicyDecision.model_validate(trace_data["decision"])
         second = first.model_copy(update={"id": "dec-0002", "verdict": Verdict.REJECT})
         trace = ProposalTrace(proposal=proposal, decisions=(first, second))
@@ -883,13 +1064,49 @@ class TestModels:
         approval = Approval.model_validate(trace_data["approval"])
         assert ProposalTrace(proposal=proposal, approvals=(approval,)).approval == approval
 
+    def test_reasoning_needs_a_cycle_or_a_proposal(self):
+        under_cycle = Reasoning(cycle_id="cycle-1", stage=ReasoningStage.SCAN, content="c")
+        assert under_cycle.proposal_id is None
+        assert under_cycle.model_name is None and under_cycle.latency_ms is None
+        assert Reasoning(proposal_id="p", stage=ReasoningStage.SCAN, content="c").cycle_id is None  # the 0001 shape
+        both = Reasoning(
+            cycle_id="cycle-1", proposal_id="p", stage=ReasoningStage.SCAN, content="c",
+            model_name="claude-haiku-4-5-20251001", latency_ms=812.5,
+        )
+        assert (both.model_name, both.latency_ms) == ("claude-haiku-4-5-20251001", 812.5)
+        assert Reasoning.model_validate(both.model_dump(mode="json")) == both
+        with pytest.raises(ValidationError, match="cycle_id or a proposal_id"):
+            Reasoning(stage=ReasoningStage.SCAN, content="c")
+        with pytest.raises(ValidationError, match="finite"):
+            Reasoning(cycle_id="cycle-1", stage=ReasoningStage.SCAN, content="c", latency_ms=float("nan"))
+
+    def test_proposal_leg(self):
+        leg = ProposalLeg(
+            proposal_id="p", leg_index=0, symbol=" spy261016c00640000 ", option_type="call", side="buy",
+            quantity=1, strike=640, expiration="2026-10-16",
+        )
+        assert leg.symbol == "SPY261016C00640000"
+        assert leg.option_type is OptionType.CALL and leg.side is OrderSide.BUY
+        assert leg.expiration == date(2026, 10, 16) and uuid.UUID(leg.id).version == 4
+        assert leg.model_dump(mode="json")["expiration"] == "2026-10-16"
+        assert ProposalLeg.model_validate(leg.model_dump(mode="json")) == leg
+        for field, bad in (
+            ("leg_index", -1), ("quantity", 0), ("quantity", -1), ("strike", 0), ("strike", -640),
+            ("symbol", "  "), ("option_type", "future"), ("side", "hold"), ("expiration", "soon"),
+            ("strike", float("nan")),
+        ):
+            with pytest.raises(ValidationError):
+                ProposalLeg.model_validate({**leg.model_dump(), field: bad})
+        with pytest.raises(ValidationError):
+            leg.strike = 650
+
     def test_store_status_model(self):
         report = StoreStatus(
-            path="x.db", exists=True, schema_version=1, journal_mode="wal",
-            applied_migrations=("0001_initial",), pending_migrations=(),
+            path="x.db", exists=True, schema_version=2, journal_mode="wal",
+            applied_migrations=("0001_initial", "0002_reasoning_cycles_and_legs"), pending_migrations=(),
             row_counts={table: 0 for table in TABLES},
         )
-        assert report.applied_migrations == ("0001_initial",)
+        assert report.applied_migrations == ("0001_initial", "0002_reasoning_cycles_and_legs")
         assert set(report.row_counts) == set(TABLES)
 
 
@@ -935,8 +1152,8 @@ class TestStatus:
     def test_after_open_store(self, conn, db_path):
         report = status(conn, db_path)
         assert report == StoreStatus(
-            path=str(db_path), exists=True, schema_version=1, journal_mode="wal",
-            applied_migrations=("0001_initial",), pending_migrations=(),
+            path=str(db_path), exists=True, schema_version=2, journal_mode="wal",
+            applied_migrations=("0001_initial", "0002_reasoning_cycles_and_legs"), pending_migrations=(),
             row_counts={table: 0 for table in TABLES},
         )
         assert report.exists is True
@@ -949,7 +1166,7 @@ class TestStatus:
         report = status(conn, db_path)
         assert report.exists is True and report.schema_version == 0
         assert report.applied_migrations == ()
-        assert report.pending_migrations == ("0001_initial",)
+        assert report.pending_migrations == ("0001_initial", "0002_reasoning_cycles_and_legs")
         assert report.row_counts == {table: 0 for table in TABLES}
         assert report.missing_tables == ()  # not created yet is not the same as dropped
         conn.close()
@@ -963,9 +1180,10 @@ class TestStatus:
             snapshot_pnl(conn, _pnl(AWARE + timedelta(minutes=n), float(n)))
         for n in range(6):
             log_event(conn, Event(level=EventLevel.INFO, kind="k", message=str(n)))
+        insert_proposal(conn, _bare_proposal("prop-0002"), _legs("prop-0002", 7))
         expected = {
-            "proposals": 1, "reasoning": 3, "policy_decisions": 1, "approvals": 1, "orders": 1,
-            "fills": 2, "position_snapshots": 4, "pnl_snapshots": 5, "events": 6,
+            "proposals": 2, "proposal_legs": 7, "reasoning": 3, "policy_decisions": 1, "approvals": 1,
+            "orders": 1, "fills": 2, "position_snapshots": 4, "pnl_snapshots": 5, "events": 6,
         }
         assert status(conn, db_path).row_counts == expected
         assert {table: _count(conn, table) for table in TABLES} == expected
@@ -974,7 +1192,7 @@ class TestStatus:
         conn = connect(":memory:")
         migrate(conn)
         report = status(conn, ":memory:")
-        assert report.exists is True and report.journal_mode == "memory" and report.schema_version == 1
+        assert report.exists is True and report.journal_mode == "memory" and report.schema_version == 2
         conn.close()
 
 
@@ -1405,8 +1623,8 @@ class TestRepo:
             assert "UNIQUE constraint failed" in str(info.value), what
             assert not conn.in_transaction
         assert {table: _count(conn, table) for table in TABLES} == {
-            "proposals": 1, "reasoning": 3, "policy_decisions": 1, "approvals": 1, "orders": 1,
-            "fills": 1, "position_snapshots": 0, "pnl_snapshots": 0, "events": 1,
+            "proposals": 1, "proposal_legs": 0, "reasoning": 3, "policy_decisions": 1, "approvals": 1,
+            "orders": 1, "fills": 1, "position_snapshots": 0, "pnl_snapshots": 0, "events": 1,
         }
         trace = get_proposal_trace(conn, "prop-0001")
         assert len(trace.reasoning) == 3 and len(trace.decisions) == 1 and len(trace.fills) == 1
@@ -1439,7 +1657,9 @@ class TestRepo:
         "write",
         [
             lambda c: insert_proposal(c, _bare_proposal("prop-0002")),
+            lambda c: insert_proposal(c, _bare_proposal("prop-0003"), _legs("prop-0003")),
             lambda c: add_reasoning(c, Reasoning(proposal_id="prop-0001", stage=ReasoningStage.SCAN, content="c")),
+            lambda c: link_reasoning_to_proposal(c, "cycle-0001", "prop-0001"),
             lambda c: record_decision(c, PolicyDecision(proposal_id="prop-0001", verdict=Verdict.REJECT, rules_evaluated=[])),
             lambda c: record_approval(c, Approval(proposal_id="prop-0001", channel="cli")),
             lambda c: upsert_order(c, _bare_order("ord-0009", "coid-0009")),
@@ -1449,8 +1669,9 @@ class TestRepo:
             lambda c: log_event(c, Event(level=EventLevel.INFO, kind="k", message="m")),
         ],
         ids=[
-            "insert_proposal", "add_reasoning", "record_decision", "record_approval", "upsert_order",
-            "record_fill", "snapshot_positions", "snapshot_pnl", "log_event",
+            "insert_proposal", "insert_proposal_with_legs", "add_reasoning", "link_reasoning_to_proposal",
+            "record_decision", "record_approval", "upsert_order", "record_fill", "snapshot_positions",
+            "snapshot_pnl", "log_event",
         ],
     )
     def test_writes_never_join_a_callers_transaction(self, conn, trace_data, write):
@@ -1469,6 +1690,7 @@ class TestRepo:
         conn.execute("PRAGMA foreign_keys=OFF")  # so the parent tables can go
         for statement in (
             "DROP TABLE events", "DROP TABLE pnl_snapshots", "DROP TABLE orders", "DROP TABLE proposals",
+            "DROP TABLE proposal_legs", "DROP TABLE reasoning",
         ):
             conn.execute(statement)
         for what, call in (
@@ -1477,6 +1699,12 @@ class TestRepo:
             ("get open orders", lambda: get_open_orders(conn)),
             ("get order for aegis-prop-0001-1", lambda: get_order(conn, "aegis-prop-0001-1")),
             ("get proposal for prop-0001", lambda: get_proposal(conn, "prop-0001")),
+            ("get recent proposals", lambda: get_recent_proposals(conn)),
+            ("get proposal legs for prop-0001", lambda: get_proposal_legs(conn, "prop-0001")),
+            ("get cycle reasoning for cycle-0001", lambda: get_cycle_reasoning(conn, "cycle-0001")),
+            ("get token usage for 2026-07-30", lambda: get_token_usage(conn, date(2026, 7, 30))),
+            ("get cycle token usage for cycle-0001", lambda: get_cycle_token_usage(conn, "cycle-0001")),
+            ("get token usage by model for 2026-07-30", lambda: get_token_usage_by_model(conn, date(2026, 7, 30))),
             ("proposal trace for prop-0001", lambda: get_proposal_trace(conn, "prop-0001")),
         ):
             with pytest.raises(StoreError, match=what) as info:
@@ -1536,18 +1764,197 @@ class TestRepo:
             approvals=(approval,), orders=(order,), fills=(fill,),
         )
         assert {table: _count(conn, table) for table in TABLES} == {
-            "proposals": 1, "reasoning": 3, "policy_decisions": 1, "approvals": 1, "orders": 1,
-            "fills": 1, "position_snapshots": 0, "pnl_snapshots": 0, "events": 0,
+            "proposals": 1, "proposal_legs": 0, "reasoning": 3, "policy_decisions": 1, "approvals": 1,
+            "orders": 1, "fills": 1, "position_snapshots": 0, "pnl_snapshots": 0, "events": 0,
         }
 
     def test_repo_functions_are_re_exported(self):
         for name in (
-            "insert_proposal", "add_reasoning", "record_decision", "record_approval", "upsert_order",
-            "record_fill", "snapshot_positions", "snapshot_pnl", "log_event", "get_proposal",
-            "get_order", "get_open_orders", "get_daily_pnl", "get_recent_events", "get_proposal_trace",
+            "insert_proposal", "add_reasoning", "link_reasoning_to_proposal", "record_decision", "record_approval",
+            "upsert_order", "record_fill", "snapshot_positions", "snapshot_pnl", "log_event", "get_proposal",
+            "get_recent_proposals", "get_proposal_legs", "get_cycle_reasoning", "get_order", "get_open_orders",
+            "get_daily_pnl", "get_token_usage", "get_cycle_token_usage", "get_token_usage_by_model",
+            "get_recent_events", "get_proposal_trace",
         ):
             assert getattr(aegis.store, name) is getattr(repo, name)
             assert name in aegis.store.__all__
+        for name in ("ProposalLeg", "TokenUsage"):
+            assert getattr(aegis.store, name) is getattr(store_models, name)
+            assert name in aegis.store.__all__
+
+    def test_reasoning_rows_live_under_a_cycle_before_any_proposal(self, conn):
+        """Scan and thesis rows are written before a proposal exists (and never get one on NO_TRADE)."""
+        late = AWARE + timedelta(minutes=1)
+        thesis = add_reasoning(conn, Reasoning(
+            id="reas-thesis", cycle_id="cycle-1", stage=ReasoningStage.THESIS, content="t", created_at=late,
+            tokens_in=1500, tokens_out=220, model_name="claude-opus-5-5", latency_ms=812.5,
+        ))
+        scan = add_reasoning(conn, Reasoning(  # written second but earlier: the read orders by created_at
+            id="reas-scan", cycle_id="cycle-1", stage=ReasoningStage.SCAN, content="s", created_at=AWARE,
+            tokens_in=1200, tokens_out=180, model_name="claude-haiku-4-5-20251001", latency_ms=301.0,
+        ))
+        other = add_reasoning(conn, Reasoning(id="reas-other", cycle_id="cycle-2", stage=ReasoningStage.SCAN, content="o"))
+        assert get_cycle_reasoning(conn, "cycle-1") == [scan, thesis]
+        assert get_cycle_reasoning(conn, "cycle-2") == [other]
+        assert get_cycle_reasoning(conn, "cycle-none") == []
+        assert scan.proposal_id is None and other.model_name is None and other.latency_ms is None
+        row = conn.execute(
+            "SELECT cycle_id, proposal_id, model_name, latency_ms FROM reasoning WHERE id = ?", ("reas-scan",)
+        ).fetchone()
+        assert tuple(row) == ("cycle-1", None, "claude-haiku-4-5-20251001", 301.0)
+        assert _count(conn, "proposals") == 0  # no proposal was ever needed
+        for record in (scan, thesis, other):
+            assert Reasoning.model_validate(record.model_dump(mode="json")) == record
+
+    def test_link_reasoning_to_proposal_links_exactly_the_cycles_unlinked_rows(self, conn, trace_data):
+        for n, stage in enumerate(ReasoningStage):
+            add_reasoning(conn, Reasoning(
+                id="reas-" + stage.value, cycle_id="cycle-0001", stage=stage, content="c",
+                created_at=AWARE + timedelta(minutes=n),
+            ))
+        add_reasoning(conn, Reasoning(id="reas-other-cycle", cycle_id="cycle-0002", stage=ReasoningStage.SCAN, content="c"))
+        insert_proposal(conn, _bare_proposal("prop-earlier").model_copy(update={"cycle_id": "cycle-0001"}))
+        add_reasoning(conn, Reasoning(  # the same cycle, already linked elsewhere: must be left alone
+            id="reas-taken", cycle_id="cycle-0001", proposal_id="prop-earlier", stage=ReasoningStage.PROPOSAL, content="c",
+        ))
+        proposal = insert_proposal(conn, Proposal.model_validate(trace_data["proposal"]))  # cycle-0001
+        assert get_proposal_trace(conn, proposal.id).reasoning == ()
+
+        assert link_reasoning_to_proposal(conn, "cycle-0001", proposal.id) == 3
+        assert not conn.in_transaction
+        trace = get_proposal_trace(conn, proposal.id)
+        assert [r.id for r in trace.reasoning] == ["reas-scan", "reas-thesis", "reas-proposal"]
+        assert {r.cycle_id for r in trace.reasoning} == {"cycle-0001"}
+        assert {r.proposal_id for r in trace.reasoning} == {proposal.id}
+        assert [r.id for r in get_proposal_trace(conn, "prop-earlier").reasoning] == ["reas-taken"]
+        assert get_cycle_reasoning(conn, "cycle-0002")[0].proposal_id is None  # another cycle: untouched
+        assert link_reasoning_to_proposal(conn, "cycle-0001", proposal.id) == 0  # nothing left to link
+        assert link_reasoning_to_proposal(conn, "cycle-none", proposal.id) == 0
+        with pytest.raises(
+            StoreError, match="link reasoning to proposal for cycle cycle-0002 -> proposal no-such-proposal"
+        ) as info:
+            link_reasoning_to_proposal(conn, "cycle-0002", "no-such-proposal")
+        assert isinstance(info.value.cause, sqlite3.IntegrityError) and "FOREIGN KEY" in str(info.value)
+        assert not conn.in_transaction
+        assert get_cycle_reasoning(conn, "cycle-0002")[0].proposal_id is None  # rolled back
+
+    def test_insert_proposal_can_link_its_cycles_reasoning_in_the_same_transaction(self, conn, trace_data):
+        """The proposal, its legs and the link of its cycle's unlinked reasoning rows land
+        together or not at all: a failing link rolls the proposal and its legs back."""
+        for stage in ReasoningStage:
+            add_reasoning(conn, Reasoning(id="reas-" + stage.value, cycle_id="cycle-0001", stage=stage, content="c"))
+        add_reasoning(conn, Reasoning(id="reas-other", cycle_id="cycle-0002", stage=ReasoningStage.SCAN, content="c"))
+        proposal = Proposal.model_validate(trace_data["proposal"])  # cycle-0001
+        conn.execute(
+            "CREATE TRIGGER refuse_link BEFORE UPDATE OF proposal_id ON reasoning"
+            " BEGIN SELECT RAISE(ABORT, 'link refused'); END"
+        )
+        with pytest.raises(StoreError, match=f"insert proposal for {proposal.id} .*link refused"):
+            insert_proposal(conn, proposal, _legs(proposal.id), link_cycle_reasoning=True)
+        assert not conn.in_transaction
+        assert get_proposal(conn, proposal.id) is None and get_proposal_legs(conn, proposal.id) == []
+        assert {r.proposal_id for r in get_cycle_reasoning(conn, "cycle-0001")} == {None}
+
+        conn.execute("DROP TRIGGER refuse_link")
+        assert insert_proposal(conn, proposal, _legs(proposal.id), link_cycle_reasoning=True) == proposal
+        trace = get_proposal_trace(conn, proposal.id)
+        assert [r.id for r in trace.reasoning] == ["reas-scan", "reas-thesis", "reas-proposal"]
+        assert len(trace.legs) == 2
+        assert get_cycle_reasoning(conn, "cycle-0002")[0].proposal_id is None  # another cycle: untouched
+        # without the flag nothing is linked (the default, as before)
+        other = _bare_proposal("prop-unlinked").model_copy(update={"cycle_id": "cycle-0002"})
+        insert_proposal(conn, other)
+        assert get_cycle_reasoning(conn, "cycle-0002")[0].proposal_id is None
+
+    def test_legs_round_trip_through_insert_proposal_and_trace(self, conn, trace_data):
+        proposal = Proposal.model_validate(trace_data["proposal"])
+        legs = _legs(proposal.id)
+        assert insert_proposal(conn, proposal, legs[::-1]) == proposal  # written index 1 first
+        trace = get_proposal_trace(conn, proposal.id)
+        assert trace.legs == tuple(legs) and get_proposal_legs(conn, proposal.id) == legs
+        assert [leg.leg_index for leg in trace.legs] == [0, 1]
+        assert trace.legs[0].expiration == date(2026, 10, 16) and trace.legs[1].side is OrderSide.SELL
+        rows = conn.execute(
+            "SELECT leg_index, symbol, option_type, side, quantity, strike, expiration FROM proposal_legs"
+            " ORDER BY leg_index"
+        ).fetchall()
+        assert [tuple(row) for row in rows] == [
+            (0, "SPY261016C00640000", "call", "buy", 1.0, 640.0, "2026-10-16"),
+            (1, "SPY261016C00650000", "call", "sell", 1.0, 650.0, "2026-10-16"),
+        ]
+        # an equity proposal has none, and another proposal's legs never leak into a trace
+        equity = insert_proposal(conn, _bare_proposal("prop-0002"))
+        assert get_proposal_legs(conn, equity.id) == [] and get_proposal_trace(conn, equity.id).legs == ()
+        assert get_proposal_legs(conn, "nope") == []
+        assert {leg.proposal_id for leg in get_proposal_trace(conn, proposal.id).legs} == {proposal.id}
+        for record in legs:
+            assert ProposalLeg.model_validate(record.model_dump(mode="json")) == record
+
+    def test_insert_proposal_with_legs_is_all_or_none(self, conn):
+        proposal = _bare_proposal("prop-0003")
+        stray = _legs("prop-other", 1)
+        with pytest.raises(StoreError, match=r"insert proposal \(leg 0 belongs to proposal prop-other\) for prop-0003") as info:
+            insert_proposal(conn, proposal, stray)
+        assert info.value.cause is None
+        assert _count(conn, "proposals") == 0 and _count(conn, "proposal_legs") == 0  # refused before any write
+        clashing = _legs(proposal.id) + [_legs(proposal.id, 1)[0].model_copy(update={"id": "leg-dup"})]  # index 0 twice
+        with pytest.raises(StoreError, match="insert proposal for prop-0003") as info:
+            insert_proposal(conn, proposal, clashing)
+        assert isinstance(info.value.cause, sqlite3.IntegrityError) and "UNIQUE" in str(info.value)
+        assert not conn.in_transaction
+        assert _count(conn, "proposals") == 0 and _count(conn, "proposal_legs") == 0  # the proposal rolled back too
+        insert_proposal(conn, proposal, _legs(proposal.id))
+        assert _count(conn, "proposals") == 1 and _count(conn, "proposal_legs") == 2
+        legless = _bare_proposal("prop-0004")
+        assert insert_proposal(conn, legless, []) == legless and get_proposal_legs(conn, legless.id) == []
+
+    def test_token_usage_by_utc_day_cycle_and_model(self, conn, monkeypatch):
+        day = date(2026, 7, 30)
+        eastern = timezone(timedelta(hours=-4))
+        rows = (
+            ("a", "cycle-1", datetime(2026, 7, 30, 9, 30, tzinfo=timezone.utc), 1000, 100, "haiku"),
+            ("b", "cycle-1", datetime(2026, 7, 30, 23, 59, 59, tzinfo=timezone.utc), 2000, None, "opus"),  # NULL out → 0
+            ("c", "cycle-2", datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc), None, None, None),  # no usage, no model
+            ("d", "cycle-2", datetime(2026, 7, 30, 20, 0, tzinfo=eastern), 4000, 400, "haiku"),  # 00:00Z on the 31st
+            ("e", "cycle-3", datetime(2026, 7, 29, 23, 59, tzinfo=timezone.utc), 8000, 800, "opus"),
+        )
+        for id_, cycle_id, created_at, tokens_in, tokens_out, model_name in rows:
+            add_reasoning(conn, Reasoning(
+                id=id_, cycle_id=cycle_id, stage=ReasoningStage.SCAN, content="c", created_at=created_at,
+                tokens_in=tokens_in, tokens_out=tokens_out, model_name=model_name,
+            ))
+        usage = get_token_usage(conn, day)
+        assert usage == TokenUsage(tokens_in=3000, tokens_out=100, calls=3) and usage.total == 3100
+        assert get_token_usage(conn, date(2026, 7, 31)) == TokenUsage(tokens_in=4000, tokens_out=400, calls=1)
+        assert get_token_usage(conn, date(2026, 7, 28)) == TokenUsage() and TokenUsage().total == 0
+        assert get_token_usage(conn, datetime(2026, 7, 30, 20, 0, tzinfo=eastern)).calls == 1  # the 31st, in UTC
+        assert get_token_usage(conn, datetime(2026, 7, 30, 12, 0)).calls == 3  # naive is UTC
+        monkeypatch.setattr(repo, "utcnow", lambda: datetime(2026, 7, 30, 18, 0, tzinfo=timezone.utc))
+        assert get_token_usage(conn) == usage
+        assert get_cycle_token_usage(conn, "cycle-1") == TokenUsage(tokens_in=3000, tokens_out=100, calls=2)
+        assert get_cycle_token_usage(conn, "cycle-2") == TokenUsage(tokens_in=4000, tokens_out=400, calls=2)
+        assert get_cycle_token_usage(conn, "cycle-none") == TokenUsage()
+        by_model = get_token_usage_by_model(conn, day)
+        assert by_model == {
+            "haiku": TokenUsage(tokens_in=1000, tokens_out=100, calls=1),
+            "opus": TokenUsage(tokens_in=2000, tokens_out=0, calls=1),
+            "unknown": TokenUsage(tokens_in=0, tokens_out=0, calls=1),
+        }
+        assert list(by_model) == ["haiku", "opus", "unknown"]
+        assert get_token_usage_by_model(conn) == by_model
+        assert get_token_usage_by_model(conn, date(2026, 7, 28)) == {}
+        assert sum(u.total for u in by_model.values()) == usage.total
+
+    def test_get_recent_proposals_newest_first(self, conn, trace_data):
+        assert get_recent_proposals(conn) == []
+        base = Proposal.model_validate(trace_data["proposal"])
+        for n in (2, 0, 1):  # inserted out of order: the read must sort by created_at, not rowid
+            insert_proposal(conn, base.model_copy(update={"id": f"prop-{n}", "created_at": AWARE + timedelta(minutes=n)}))
+        tie = insert_proposal(conn, base.model_copy(update={"id": "prop-tie", "created_at": AWARE + timedelta(minutes=2)}))
+        assert [p.id for p in get_recent_proposals(conn)] == ["prop-tie", "prop-2", "prop-1", "prop-0"]
+        assert [p.id for p in get_recent_proposals(conn, limit=2)] == ["prop-tie", "prop-2"]
+        assert get_recent_proposals(conn, limit=0) == []
+        assert get_recent_proposals(conn)[0] == tie == get_proposal(conn, "prop-tie")
 
 
 _SQL_VERBS = ("SELECT", "INSERT", "UPDATE", "DELETE")
@@ -1613,16 +2020,16 @@ class TestCli:
         assert db_path.exists()
         assert str(db_path) in out and "(created)" in out
         assert "journal mode: wal" in out
-        assert "schema version 1 (applied: 0001_initial)" in out
+        assert "schema version 2 (applied: 0001_initial, 0002_reasoning_cycles_and_legs)" in out
         assert "up to date" not in out
 
         assert cli_db.main(["init", "--db", str(db_path)]) == 0
         out = capsys.readouterr().out
         assert "(created)" not in out and "wal" in out
-        assert "schema version 1 (applied: 0001_initial) [up to date]" in out
+        assert "schema version 2 (applied: 0001_initial, 0002_reasoning_cycles_and_legs) [up to date]" in out
         conn = connect(db_path)
-        assert conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 1
-        assert schema_version(conn) == 1
+        assert conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 2
+        assert schema_version(conn) == 2
         conn.close()
 
     def test_db_status_missing_file_exits_1_without_creating_it(self, tmp_path, capsys):
@@ -1633,19 +2040,20 @@ class TestCli:
         assert "aegis.cli.db init" in captured.out
         assert not missing.exists() and not missing.parent.exists()
 
-    def test_db_status_after_init_lists_nine_tables(self, db_path, conn, trace_data, capsys):
+    def test_db_status_after_init_lists_ten_tables(self, db_path, conn, trace_data, capsys):
         _seed_trace(conn, trace_data)
+        insert_proposal(conn, _bare_proposal("prop-0002"), _legs("prop-0002"))
         assert cli_db.main(["status", "--db", str(db_path)]) == 0
         out = capsys.readouterr().out
         assert str(db_path) in out and "exists: yes" in out
         assert "journal mode: wal" in out
-        assert "schema version 1 (applied: 0001_initial)" in out
+        assert "schema version 2 (applied: 0001_initial, 0002_reasoning_cycles_and_legs)" in out
         assert "pending migrations: none" in out
         counts = dict(re.findall(r"^  (\w+)\s+(\d+)$", out, re.MULTILINE))
-        assert set(counts) == set(TABLES) and len(counts) == 9
+        assert set(counts) == set(TABLES) and len(counts) == 10
         assert {t: int(n) for t, n in counts.items()} == {
-            "proposals": 1, "reasoning": 3, "policy_decisions": 1, "approvals": 1, "orders": 1,
-            "fills": 1, "position_snapshots": 0, "pnl_snapshots": 0, "events": 0,
+            "proposals": 2, "proposal_legs": 2, "reasoning": 3, "policy_decisions": 1, "approvals": 1,
+            "orders": 1, "fills": 1, "position_snapshots": 0, "pnl_snapshots": 0, "events": 0,
         }
 
     def test_db_status_on_unmigrated_file(self, db_path, capsys):
@@ -1653,8 +2061,9 @@ class TestCli:
         assert cli_db.main(["status", "--db", str(db_path)]) == 0
         out = capsys.readouterr().out
         assert "schema version 0 (applied: none)" in out
-        assert "pending migrations: 0001_initial" in out
+        assert "pending migrations: 0001_initial, 0002_reasoning_cycles_and_legs" in out
         assert re.search(r"^  events\s+0$", out, re.MULTILINE)
+        assert re.search(r"^  proposal_legs\s+0$", out, re.MULTILINE)
 
     def test_db_relative_path_resolves_against_cwd(self, tmp_path, monkeypatch, capsys):
         monkeypatch.chdir(tmp_path)
@@ -1719,6 +2128,7 @@ class TestCli:
         assert "  order        buy 2 limit @ 12.20" in lines
         assert "  confidence   0.62" in lines
         assert "  model        synthetic-model-v0 (prompt test-prompt-1)" in lines
+        assert "  legs (0)" in lines  # the fixture proposal carries no leg rows
         # thesis, invalidation and the raw model output are shown in full, indented
         assert "    " + proposal.thesis in lines
         assert "    " + proposal.invalidation in lines
@@ -1756,9 +2166,30 @@ class TestCli:
         proposal = insert_proposal(conn, Proposal.model_validate(trace_data["proposal"]))
         assert cli_trace.main([proposal.id, "--db", str(db_path)]) == 0
         out = capsys.readouterr().out
-        for title in ("reasoning (0)", "decisions (0)", "approvals (0)", "orders (0)"):
+        for title in ("legs (0)", "reasoning (0)", "decisions (0)", "approvals (0)", "orders (0)"):
             assert title in out
-        assert out.count("(none)") == 4
+        assert out.count("(none)") == 5
+
+    def test_trace_prints_legs(self, db_path, conn, trace_data, capsys):
+        proposal = Proposal.model_validate(trace_data["proposal"])
+        insert_proposal(conn, proposal, _legs(proposal.id)[::-1])  # written index 1 first
+        assert cli_trace.main([proposal.id, "--db", str(db_path)]) == 0
+        out = capsys.readouterr().out
+        lines = out.splitlines()
+        assert "  legs (2)" in lines
+        assert "    [0] buy 1 call 640.0 exp 2026-10-16  SPY261016C00640000" in lines
+        assert "    [1] sell 1 call 650.0 exp 2026-10-16  SPY261016C00650000" in lines
+        assert out.index("legs (2)") < out.index("[0] buy") < out.index("[1] sell") < out.index("thesis:")
+        assert out.count("(none)") == 4  # reasoning, decisions, approvals, orders — not legs
+        assert [cli_trace._strike(v) for v in (640.0, 642.5, 7, 0.0001, 1234567.5)] == [
+            "640.0", "642.5", "7.0", "0.0001", "1234567.5",
+        ]
+        assert cli_trace.main([proposal.id, "--db", str(db_path), "--json"]) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert [(leg["leg_index"], leg["symbol"], leg["side"], leg["expiration"]) for leg in data["legs"]] == [
+            (0, "SPY261016C00640000", "buy", "2026-10-16"), (1, "SPY261016C00650000", "sell", "2026-10-16"),
+        ]
+        assert ProposalTrace.model_validate(data) == get_proposal_trace(conn, proposal.id)
 
     def test_trace_prints_a_rejection(self, db_path, conn, trace_data, capsys):
         insert_proposal(conn, Proposal.model_validate(trace_data["proposal"]))
@@ -1839,7 +2270,7 @@ class TestCli:
         assert cli_db.main(["init", "--db", ":memory:"]) == 0
         out = capsys.readouterr().out
         assert "database: :memory:" in out and "journal mode: memory" in out
-        assert "schema version 1 (applied: 0001_initial)" in out
+        assert "schema version 2 (applied: 0001_initial, 0002_reasoning_cycles_and_legs)" in out
         assert cli_db.main(["status", "--db", ":memory:"]) == 1
         assert "exists: no" in capsys.readouterr().out
         assert cli_trace.main(["prop-0001", "--db", ":memory:"]) == 1
@@ -1873,23 +2304,24 @@ class TestCli:
         assert cli_trace.main(["prop-0001", "--db", str(db_path)]) == 1
         captured = capsys.readouterr()
         assert captured.out == ""
-        assert captured.err.startswith("trace failed: ") and "pending migrations (0001_initial)" in captured.err
+        assert captured.err.startswith("trace failed: ")
+        assert "pending migrations (0001_initial, 0002_reasoning_cycles_and_legs)" in captured.err
         assert "aegis.cli.db init" in captured.err and captured.err.count("\n") == 1
         conn = connect(db_path)
         assert schema_version(conn) == 0 and _table_names(conn) == set()
         # a database one migration behind this code is refused the same way
-        assert migrate(conn) == 1
+        assert migrate(conn) == 2
         migrations = tmp_path / "migrations"
         migrations.mkdir()
-        initial = MIGRATIONS_DIR / "0001_initial.sql"
-        (migrations / initial.name).write_text(initial.read_text(encoding="utf-8"), encoding="utf-8")
-        (migrations / "0002_extra.sql").write_text(
+        for _, _, real in list_migrations():
+            (migrations / real.name).write_text(real.read_text(encoding="utf-8"), encoding="utf-8")
+        (migrations / "0003_extra.sql").write_text(
             "CREATE TABLE IF NOT EXISTS extra (id TEXT PRIMARY KEY NOT NULL);\n", encoding="utf-8"
         )
         monkeypatch.setattr(store_db, "MIGRATIONS_DIR", migrations)
         assert cli_trace.main(["prop-0001", "--db", str(db_path)]) == 1
-        assert "pending migrations (0002_extra)" in capsys.readouterr().err
-        assert schema_version(conn) == 1 and "extra" not in _table_names(conn)
+        assert "pending migrations (0003_extra)" in capsys.readouterr().err
+        assert schema_version(conn) == 2 and "extra" not in _table_names(conn)
         conn.close()
 
     def test_trace_prints_non_ascii_content_under_an_ascii_stdout(self, db_path, conn, trace_data, monkeypatch):
@@ -1915,8 +2347,9 @@ class TestCli:
         captured = capsys.readouterr()
         assert captured.err == ""
         data = json.loads(captured.out)
-        assert set(data) == {"proposal", "reasoning", "decisions", "approvals", "orders", "fills"}
-        assert data["proposal"]["id"] == "prop-0001"
+        assert set(data) == {"proposal", "legs", "reasoning", "decisions", "approvals", "orders", "fills"}
+        assert data["proposal"]["id"] == "prop-0001" and data["legs"] == []
+        assert [r["cycle_id"] for r in data["reasoning"]] == [None] * 3  # the fixture rows predate cycles
         assert [r["stage"] for r in data["reasoning"]] == ["scan", "thesis", "proposal"]
         assert data["decisions"][0]["verdict"] == "NEEDS_APPROVAL"
         assert data["decisions"][0]["rules_evaluated"] == trace_data["decision"]["rules_evaluated"]

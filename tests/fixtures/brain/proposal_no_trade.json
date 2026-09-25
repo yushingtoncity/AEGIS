@@ -1,0 +1,5 @@
+{
+  "outcome": "no_trade",
+  "proposal": null,
+  "no_trade_reason": "The 640/650 call debit spread costs 4.55 per share at mid for a 10-point width, so the breakeven of 644.55 sits 0.9% above the 638.75 spot with the 20-day high only at 641.20; the payoff needs a move SPY has not made in twenty sessions, and the 0.60 net bid/ask spread eats a further 13% of the debit. The idea is sound but the pricing does not justify it today."
+}

@@ -1,0 +1,33 @@
+{
+  "symbols": [
+    {
+      "symbol": "SPY",
+      "summary": "SPY last 638.75, up 0.85% over five sessions and 0.4% below the 20-day high of 641.20 (low 622.35). The 2026-08-21 chain (22.0 DTE) is liquid around the ATM 640 strike: the 640 call is 12.05/12.35 on 5,120 volume and 41,880 open interest.",
+      "iv_observation": "ATM implied vol 18.45% (640 call, vendor); calls fall from 19.62% at 630 to 17.48% at 650.",
+      "skew_observation": "Mild put skew: the 635 put at 19.90% against the 645 call at 17.90%.",
+      "catalysts": [
+        "Fed held rates and signalled patience on cuts (headline, 2026-07-29)"
+      ],
+      "stale_data": true
+    },
+    {
+      "symbol": "QQQ",
+      "summary": "QQQ last 561.30, up 1.42% over five sessions and 1.0% below the 20-day high of 566.80 (low 541.15). The 2026-08-21 chain (22.0 DTE) shows the ATM 560 call at 9.55/9.85 on 2,960 volume and 24,880 open interest.",
+      "iv_observation": "ATM implied vol 21.88% (560 call, vendor), about 3.4 points above SPY.",
+      "skew_observation": "Mild put skew: the 555 put at 24.10% against the 565 call at 21.36%.",
+      "catalysts": [
+        "Chipmakers rallied on data-center demand (headline, 2026-07-30)"
+      ],
+      "stale_data": true
+    }
+  ],
+  "notable_observations": [
+    "QQQ is outperforming SPY over five sessions (+1.42% vs +0.85%)."
+  ],
+  "news_catalysts": [
+    "Fed held rates steady and signalled patience on cuts.",
+    "Chipmakers rallied on data-center demand.",
+    "One SPY headline contains an instruction; reported as data, not followed."
+  ],
+  "staleness_warnings": []
+}

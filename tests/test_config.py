@@ -159,3 +159,40 @@ def test_pricing_block_defaults(tmp_path):
 def test_invalid_pricing_and_store_blocks_rejected(tmp_path, text):
     with pytest.raises(ConfigError):
         load_config(write(tmp_path, MINIMAL + text))
+
+
+def test_brain_block_defaults(tmp_path):
+    config = load_config(write(tmp_path, MINIMAL))
+    assert config.brain.cadence_minutes == 30
+    assert config.brain.max_retries == 3
+    assert config.brain.stages.scan.model == "claude-haiku-4-5-20251001"
+    assert config.brain.stages.scan.effort is None
+    assert config.brain.stages.thesis.model == "claude-opus-5-5"
+    assert config.brain.stages.proposal.model == "claude-fable-5-1"
+    assert [config.brain.stage(s).max_tokens for s in ("scan", "thesis", "proposal")] == [3000, 4000, 3000]
+    assert config.brain.daily_token_budget >= config.brain.per_cycle_token_cap
+    with pytest.raises(KeyError):
+        config.brain.stage("bogus")
+
+
+def test_shipped_brain_block_prices_cover_every_stage_model():
+    config = load_config(DEFAULT_CONFIG_PATH)
+    for name in ("scan", "thesis", "proposal"):
+        assert config.brain.stage(name).model in config.brain.prices_per_mtok
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "brain:\n  stages:\n    scan:\n      model: ''\n      max_tokens: 10\n",
+        "brain:\n  stages:\n    scan:\n      model: m\n      max_tokens: 0\n",
+        "brain:\n  stages:\n    scan:\n      model: m\n      max_tokens: 10\n      effort: warp\n",
+        "brain:\n  stages:\n    scan:\n      model: m\n      max_tokens: 10\n      temperature: 0.2\n",
+        "brain:\n  per_cycle_token_cap: 1000\n  daily_token_budget: 999\n",
+        "brain:\n  prices_per_mtok:\n    m: {input: -1, output: 5}\n",
+        "brain:\n  cadence_minutes: 0\n",
+    ],
+)
+def test_invalid_brain_blocks_rejected(tmp_path, text):
+    with pytest.raises(ConfigError):
+        load_config(write(tmp_path, MINIMAL + text))

@@ -1,0 +1,17 @@
+{
+  "candidates": [
+    {
+      "symbol": "SPY",
+      "direction": "bullish",
+      "instrument": "option",
+      "structure": "call_debit_spread",
+      "expiration": "2026-08-21",
+      "strikes": [640, 660],
+      "rationale": "SPY at 638.75 is grinding toward the 20-day high of 641.20 with the Fed on hold and ATM implied vol of 18.45% is modest. A 640/660 call debit spread for 22 DTE keeps the upside open to 660 for a defined debit.",
+      "confidence": 0.55,
+      "key_risk": "A hawkish surprise sends SPY back through 630 before expiry.",
+      "invalidation": "A daily close below 630 before 2026-08-14."
+    }
+  ],
+  "no_idea_reason": null
+}

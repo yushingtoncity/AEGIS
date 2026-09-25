@@ -45,6 +45,7 @@ _WAL_RETRY_INTERVAL_S = 0.01
 
 TABLES: tuple[str, ...] = (
     "proposals",
+    "proposal_legs",
     "reasoning",
     "policy_decisions",
     "approvals",
@@ -59,6 +60,7 @@ TABLES: tuple[str, ...] = (
 # never get interpolated into SQL.
 _COUNT_QUERIES: dict[str, str] = {
     "proposals": "SELECT COUNT(*) FROM proposals",
+    "proposal_legs": "SELECT COUNT(*) FROM proposal_legs",
     "reasoning": "SELECT COUNT(*) FROM reasoning",
     "policy_decisions": "SELECT COUNT(*) FROM policy_decisions",
     "approvals": "SELECT COUNT(*) FROM approvals",

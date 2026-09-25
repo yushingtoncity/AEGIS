@@ -2,17 +2,18 @@
 
 Run:  python -m aegis.cli.trace PROPOSAL_ID [--db PATH] [--json]
 
-Everything is printed in full — reasoning content, notes, the model's raw
-output, every rule the policy engine evaluated, every digit of a quantity
-or price — because this is the tool an operator reaches for to reconstruct
-why AEGIS did what it did. ``--json`` prints the same lineage as
-``ProposalTrace.model_dump(mode="json")`` for scripts. ``--db`` overrides
-``store.db_path`` from config.yaml and is taken relative to the current
-directory; the database must already exist (so ``:memory:`` is refused) and
-be fully migrated — this is a read-only view, so it never applies a pending
-migration and says to run ``python -m aegis.cli.db init`` instead. Under a
-stdout that cannot encode a character (a non-UTF-8 locale), the character
-prints as a ``\\uXXXX`` escape rather than aborting the view.
+Everything is printed in full — every leg of an option structure, reasoning
+content, notes, the model's raw output, every rule the policy engine
+evaluated, every digit of a quantity or price — because this is the tool an
+operator reaches for to reconstruct why AEGIS did what it did. ``--json``
+prints the same lineage as ``ProposalTrace.model_dump(mode="json")`` for
+scripts. ``--db`` overrides ``store.db_path`` from config.yaml and is taken
+relative to the current directory; the database must already exist (so
+``:memory:`` is refused) and be fully migrated — this is a read-only view,
+so it never applies a pending migration and says to run
+``python -m aegis.cli.db init`` instead. Under a stdout that cannot encode
+a character (a non-UTF-8 locale), the character prints as a ``\\uXXXX``
+escape rather than aborting the view.
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from aegis.store.models import (
     OrderSide,
     OrderType,
     PolicyDecision,
+    ProposalLeg,
     ProposalTrace,
     Reasoning,
 )
@@ -76,6 +78,12 @@ def _money(value: float | None) -> str:
     return f"{whole}.{fraction.ljust(2, '0')}"
 
 
+def _strike(value: float) -> str:
+    """A strike: every digit, at least one decimal (``640.0``, ``642.5``, ``0.0001``)."""
+    whole, _, fraction = _qty(value).partition(".")
+    return f"{whole}.{fraction.ljust(1, '0')}"
+
+
 def _tokens(count: int | None) -> str:
     return str(count) if count is not None else "-"
 
@@ -104,6 +112,20 @@ def _rule_line(rule: dict[str, Any]) -> str:
     if name is None:
         return detail or "(empty rule)"
     return f"{name}: {detail}" if detail else str(name)
+
+
+def _print_legs(legs: tuple[ProposalLeg, ...]) -> None:
+    """``legs (N)`` then one line per leg:
+    ``[0] buy 1 call 640.0 exp 2026-10-16  SPY261016C00640000``."""
+    print(f"{INDENT}legs ({len(legs)})")
+    if not legs:
+        print(f"{INDENT * 2}(none)")
+    for leg in legs:
+        print(
+            f"{INDENT * 2}[{leg.leg_index}] {leg.side.value} {_qty(leg.quantity)}"
+            f" {leg.option_type.value} {_strike(leg.strike)} exp {leg.expiration.isoformat()}"
+            f"  {leg.symbol}"
+        )
 
 
 def _print_reasoning(stage: Reasoning) -> None:
@@ -166,6 +188,7 @@ def _print_trace(trace: ProposalTrace) -> None:
     print(f"{INDENT}order        {terms}")
     print(f"{INDENT}confidence   {_qty(proposal.confidence)}")
     print(f"{INDENT}model        {proposal.model_name} (prompt {proposal.prompt_version})")
+    _print_legs(trace.legs)
     _block("thesis", proposal.thesis, depth=1)
     _block("invalidation", proposal.invalidation, depth=1)
     _block("raw model output", proposal.raw_model_output, depth=1)

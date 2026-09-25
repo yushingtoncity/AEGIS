@@ -1,0 +1,33 @@
+{
+  "outcome": "trade",
+  "proposal": {
+    "symbol": "SPY",
+    "instrument": "option",
+    "side": "buy",
+    "quantity": 2,
+    "order_type": "limit",
+    "limit_price": 4.55,
+    "thesis": "Buy the SPY 2026-08-21 640/650 call debit spread, two units at the 4.55 mid (net bid 4.25 / ask 4.85): 910.00 USD of defined risk, 0.9% of the 100,000.00 USD equity, for a maximum profit of 1,090.00 USD if SPY closes above 650 at expiry. Breakeven is 644.55, 0.9% above the 638.75 spot, with 22 days for the post-Fed drift toward the 641.20 high to continue. Net delta is about 40 share-equivalents per unit and theta is small at 22 DTE. The mid is chosen because the quotes are 47s old and the legs are 0.30 wide; paying up to the ask is not needed.",
+    "confidence": 0.58,
+    "invalidation": "",
+    "legs": [
+      {
+        "symbol": "SPY260821C00640000",
+        "option_type": "call",
+        "side": "buy",
+        "quantity": 2,
+        "strike": 640,
+        "expiration": "2026-08-21"
+      },
+      {
+        "symbol": "SPY260821C00650000",
+        "option_type": "call",
+        "side": "sell",
+        "quantity": 2,
+        "strike": 650,
+        "expiration": "2026-08-21"
+      }
+    ]
+  },
+  "no_trade_reason": null
+}

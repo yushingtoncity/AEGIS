@@ -19,16 +19,22 @@ Writes return the record as stored. Plain inserts hand back the record they
 were given: the models already normalise symbols and timestamps, so the row
 is exactly the record. The two upserts (``record_approval``,
 ``upsert_order``) read the row back, because the stored row can differ from
-the argument. Reads return ``None`` or an empty list for nothing found;
+the argument. ``insert_proposal`` writes the proposal and its option legs in
+one transaction — and, asked to, links its cycle's reasoning rows in that
+same transaction; ``link_reasoning_to_proposal`` is that UPDATE on its own
+(a cycle's reasoning rows are written before its proposal exists) and
+returns a row count. Reads return ``None`` or an empty list for nothing found;
 ``get_proposal_trace`` is the one exception and raises, because asking for
 the lineage of a proposal that does not exist is a caller bug worth a
-clean error.
+clean error. The token reads (``get_token_usage`` and friends) are what the
+brain's budget guard measures against.
 
 Timestamps are stored as ``datetime.isoformat()`` of an aware UTC value —
 one fixed text shape (``…T14:05:00+00:00``), so text comparison against
-ISO bounds (``get_daily_pnl``) is chronological. ``rules_evaluated`` and
-``payload`` are ``json.dumps`` / ``json.loads``; ``raw_model_output`` is
-stored verbatim and never parsed.
+ISO bounds (``get_daily_pnl``, ``get_token_usage``) is chronological; a leg's
+``expiration`` is ``date.isoformat()``. ``rules_evaluated`` and ``payload``
+are ``json.dumps`` / ``json.loads``; ``raw_model_output`` is stored verbatim
+and never parsed.
 """
 
 from __future__ import annotations
@@ -39,7 +45,7 @@ from collections.abc import Sequence
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
-from aegis.data.models import utcnow
+from aegis.data.models import OptionType, utcnow
 from aegis.store.db import transaction
 from aegis.store.errors import StoreError
 from aegis.store.models import (
@@ -59,9 +65,11 @@ from aegis.store.models import (
     PolicyDecision,
     PositionSnapshot,
     Proposal,
+    ProposalLeg,
     ProposalTrace,
     Reasoning,
     ReasoningStage,
+    TokenUsage,
     Verdict,
 )
 
@@ -128,16 +136,38 @@ def _row_to_proposal(row: sqlite3.Row) -> Proposal:
     )
 
 
+def _row_to_leg(row: sqlite3.Row) -> ProposalLeg:
+    return ProposalLeg(
+        id=row["id"],
+        proposal_id=row["proposal_id"],
+        leg_index=row["leg_index"],
+        symbol=row["symbol"],
+        option_type=OptionType(row["option_type"]),
+        side=OrderSide(row["side"]),
+        quantity=row["quantity"],
+        strike=row["strike"],
+        expiration=date.fromisoformat(row["expiration"]),
+    )
+
+
 def _row_to_reasoning(row: sqlite3.Row) -> Reasoning:
     return Reasoning(
         id=row["id"],
+        cycle_id=row["cycle_id"],
         proposal_id=row["proposal_id"],
         stage=ReasoningStage(row["stage"]),
         created_at=_from_iso(row["created_at"]),
         content=row["content"],
         tokens_in=row["tokens_in"],
         tokens_out=row["tokens_out"],
+        model_name=row["model_name"],
+        latency_ms=row["latency_ms"],
     )
+
+
+def _usage(tokens_in: Any, tokens_out: Any, calls: Any) -> TokenUsage:
+    """One ``SUM(tokens_in), SUM(tokens_out), COUNT(*)`` row (the sums COALESCEd to 0)."""
+    return TokenUsage(tokens_in=int(tokens_in), tokens_out=int(tokens_out), calls=int(calls))
 
 
 def _row_to_decision(row: sqlite3.Row) -> PolicyDecision:
@@ -220,8 +250,29 @@ def _row_to_event(row: sqlite3.Row) -> Event:
 # --- writes -----------------------------------------------------------------
 
 
-def insert_proposal(conn: sqlite3.Connection, proposal: Proposal) -> Proposal:
-    """Insert a new proposal (its id must be unused)."""
+def insert_proposal(
+    conn: sqlite3.Connection,
+    proposal: Proposal,
+    legs: Sequence[ProposalLeg] = (),
+    *,
+    link_cycle_reasoning: bool = False,
+) -> Proposal:
+    """Insert a new proposal (its id must be unused) with its option legs: all or none.
+
+    Every leg must carry ``proposal.id`` as its ``proposal_id`` — a leg of
+    another proposal is a StoreError before anything is written. An equity
+    proposal passes no legs. With ``link_cycle_reasoning`` the proposal's
+    cycle's not-yet-linked reasoning rows are attached to it in the same
+    transaction (``link_reasoning_to_proposal``'s UPDATE), so a proposal
+    never lands without its reasoning, nor reasoning linked to a proposal
+    that failed to land.
+    """
+    for leg in legs:
+        if leg.proposal_id != proposal.id:
+            raise StoreError(
+                f"insert proposal (leg {leg.leg_index} belongs to proposal {leg.proposal_id})",
+                proposal.id,
+            )
     try:
         with transaction(conn):
             conn.execute(
@@ -247,31 +298,80 @@ def insert_proposal(conn: sqlite3.Connection, proposal: Proposal) -> Proposal:
                     proposal.prompt_version,
                 ),
             )
+            for leg in legs:
+                conn.execute(
+                    "INSERT INTO proposal_legs (id, proposal_id, leg_index, symbol, option_type,"
+                    " side, quantity, strike, expiration) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        leg.id,
+                        leg.proposal_id,
+                        leg.leg_index,
+                        leg.symbol,
+                        leg.option_type.value,
+                        leg.side.value,
+                        leg.quantity,
+                        leg.strike,
+                        leg.expiration.isoformat(),
+                    ),
+                )
+            if link_cycle_reasoning:  # link_reasoning_to_proposal's UPDATE, in this transaction
+                conn.execute(
+                    "UPDATE reasoning SET proposal_id = ?"
+                    " WHERE cycle_id = ? AND proposal_id IS NULL",
+                    (proposal.id, proposal.cycle_id),
+                )
     except _REPO_ERRORS as exc:
         raise StoreError("insert proposal", proposal.id, exc) from exc
     return proposal
 
 
 def add_reasoning(conn: sqlite3.Connection, reasoning: Reasoning) -> Reasoning:
-    """Append one agent stage's output to its proposal (which must exist)."""
+    """Append one agent stage's output under its cycle and/or its proposal (which must exist)."""
     try:
         with transaction(conn):
             conn.execute(
-                "INSERT INTO reasoning (id, proposal_id, stage, created_at, content,"
-                " tokens_in, tokens_out) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO reasoning (id, cycle_id, proposal_id, stage, created_at, content,"
+                " tokens_in, tokens_out, model_name, latency_ms)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     reasoning.id,
+                    reasoning.cycle_id,
                     reasoning.proposal_id,
                     reasoning.stage.value,
                     _iso(reasoning.created_at),
                     reasoning.content,
                     reasoning.tokens_in,
                     reasoning.tokens_out,
+                    reasoning.model_name,
+                    reasoning.latency_ms,
                 ),
             )
     except _REPO_ERRORS as exc:
         raise StoreError("add reasoning", reasoning.id, exc) from exc
     return reasoning
+
+
+def link_reasoning_to_proposal(conn: sqlite3.Connection, cycle_id: str, proposal_id: str) -> int:
+    """Attach a cycle's not-yet-linked reasoning rows to the proposal it produced.
+
+    Sets ``proposal_id`` on every reasoning row of ``cycle_id`` whose
+    ``proposal_id`` is still NULL — rows already linked (to this proposal or
+    another) are left alone — and returns how many rows changed (0 when the
+    cycle has none). The proposal must exist: the foreign key fails
+    otherwise and the StoreError names both ids.
+    """
+    try:
+        with transaction(conn):
+            cursor = conn.execute(
+                "UPDATE reasoning SET proposal_id = ? WHERE cycle_id = ? AND proposal_id IS NULL",
+                (proposal_id, cycle_id),
+            )
+            linked = cursor.rowcount
+    except _REPO_ERRORS as exc:
+        raise StoreError(
+            "link reasoning to proposal", f"cycle {cycle_id} -> proposal {proposal_id}", exc
+        ) from exc
+    return linked
 
 
 def record_decision(conn: sqlite3.Connection, decision: PolicyDecision) -> PolicyDecision:
@@ -484,6 +584,92 @@ def get_proposal(conn: sqlite3.Connection, proposal_id: str) -> Proposal | None:
         raise StoreError("get proposal", proposal_id, exc) from exc
 
 
+def get_recent_proposals(conn: sqlite3.Connection, limit: int = 10) -> list[Proposal]:
+    """The ``limit`` newest proposals, newest first (shown to the thesis stage so
+    it does not repeat itself)."""
+    try:
+        rows = conn.execute(
+            "SELECT * FROM proposals ORDER BY created_at DESC, rowid DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [_row_to_proposal(row) for row in rows]
+    except _REPO_ERRORS as exc:
+        raise StoreError("get recent proposals", cause=exc) from exc
+
+
+def get_proposal_legs(conn: sqlite3.Connection, proposal_id: str) -> list[ProposalLeg]:
+    """The proposal's option legs by leg_index; empty for an equity proposal (or an unknown id)."""
+    try:
+        rows = conn.execute(
+            "SELECT * FROM proposal_legs WHERE proposal_id = ? ORDER BY leg_index", (proposal_id,)
+        ).fetchall()
+        return [_row_to_leg(row) for row in rows]
+    except _REPO_ERRORS as exc:
+        raise StoreError("get proposal legs", proposal_id, exc) from exc
+
+
+def get_cycle_reasoning(conn: sqlite3.Connection, cycle_id: str) -> list[Reasoning]:
+    """Every reasoning row written under ``cycle_id``, oldest first (created_at, then rowid)."""
+    try:
+        rows = conn.execute(
+            "SELECT * FROM reasoning WHERE cycle_id = ? ORDER BY created_at, rowid", (cycle_id,)
+        ).fetchall()
+        return [_row_to_reasoning(row) for row in rows]
+    except _REPO_ERRORS as exc:
+        raise StoreError("get cycle reasoning", cycle_id, exc) from exc
+
+
+def get_token_usage(conn: sqlite3.Connection, day: date | None = None) -> TokenUsage:
+    """Tokens in/out and rows written to ``reasoning`` on ``day`` (a UTC calendar
+    day; default today).
+
+    What the budget guard measures the daily budget against. The bounds are
+    ``_utc_day_bounds`` (as ``get_daily_pnl``); a NULL token count — a row
+    written without usage — adds 0, and ``calls`` counts every row.
+    """
+    day, start, end = _utc_day_bounds(day)
+    try:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(tokens_in), 0), COALESCE(SUM(tokens_out), 0), COUNT(*)"
+            " FROM reasoning WHERE created_at >= ? AND created_at < ?",
+            (start, end),
+        ).fetchone()
+        return _usage(row[0], row[1], row[2])
+    except _REPO_ERRORS as exc:
+        raise StoreError("get token usage", day.isoformat(), exc) from exc
+
+
+def get_cycle_token_usage(conn: sqlite3.Connection, cycle_id: str) -> TokenUsage:
+    """Tokens in/out and rows of one cycle — what the per-cycle cap is measured against."""
+    try:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(tokens_in), 0), COALESCE(SUM(tokens_out), 0), COUNT(*)"
+            " FROM reasoning WHERE cycle_id = ?",
+            (cycle_id,),
+        ).fetchone()
+        return _usage(row[0], row[1], row[2])
+    except _REPO_ERRORS as exc:
+        raise StoreError("get cycle token usage", cycle_id, exc) from exc
+
+
+def get_token_usage_by_model(
+    conn: sqlite3.Connection, day: date | None = None
+) -> dict[str, TokenUsage]:
+    """``get_token_usage`` split by ``model_name``, sorted by name; rows without
+    one fall under "unknown"."""
+    day, start, end = _utc_day_bounds(day)
+    try:
+        rows = conn.execute(
+            "SELECT COALESCE(model_name, 'unknown'), COALESCE(SUM(tokens_in), 0),"
+            " COALESCE(SUM(tokens_out), 0), COUNT(*)"
+            " FROM reasoning WHERE created_at >= ? AND created_at < ?"
+            " GROUP BY COALESCE(model_name, 'unknown') ORDER BY COALESCE(model_name, 'unknown')",
+            (start, end),
+        ).fetchall()
+        return {str(row[0]): _usage(row[1], row[2], row[3]) for row in rows}
+    except _REPO_ERRORS as exc:
+        raise StoreError("get token usage by model", day.isoformat(), exc) from exc
+
+
 def get_order(conn: sqlite3.Connection, client_order_id: str) -> Order | None:
     try:
         row = conn.execute(
@@ -503,12 +689,12 @@ def get_open_orders(conn: sqlite3.Connection) -> list[Order]:
         raise StoreError("get open orders", cause=exc) from exc
 
 
-def get_daily_pnl(conn: sqlite3.Connection, day: date | None = None) -> PnlSnapshot | None:
-    """The latest P&L snapshot taken on ``day`` (a UTC calendar day; default today), or None.
+def _utc_day_bounds(day: date | None) -> tuple[date, str, str]:
+    """``(day, start, end)``: a UTC calendar day (default today) and its ISO-text bounds.
 
     Bounds are ``[day 00:00Z, next day 00:00Z)`` as ISO text; every stored
-    timestamp has the same UTC text shape, so the text comparison is
-    chronological. A ``datetime`` (a ``date`` subclass) means the UTC
+    timestamp has the same UTC text shape, so text comparison against them
+    is chronological. A ``datetime`` (a ``date`` subclass) means the UTC
     calendar day of that instant — naive taken as UTC, any other offset
     converted, as the records themselves are — never its local date.
     """
@@ -519,11 +705,21 @@ def get_daily_pnl(conn: sqlite3.Connection, day: date | None = None) -> PnlSnaps
         day = aware.astimezone(timezone.utc).date()
     start = datetime.combine(day, time.min, tzinfo=timezone.utc)
     end = start + timedelta(days=1)
+    return day, start.isoformat(), end.isoformat()
+
+
+def get_daily_pnl(conn: sqlite3.Connection, day: date | None = None) -> PnlSnapshot | None:
+    """The latest P&L snapshot taken on ``day`` (a UTC calendar day; default today), or None.
+
+    The day's bounds are ``_utc_day_bounds``: a ``datetime`` means the UTC
+    calendar day of that instant, never its local date.
+    """
+    day, start, end = _utc_day_bounds(day)
     try:
         row = conn.execute(
             "SELECT * FROM pnl_snapshots WHERE taken_at >= ? AND taken_at < ?"
             " ORDER BY taken_at DESC, rowid DESC LIMIT 1",
-            (start.isoformat(), end.isoformat()),
+            (start, end),
         ).fetchone()
         return _row_to_pnl_snapshot(row) if row is not None else None
     except _REPO_ERRORS as exc:
@@ -553,15 +749,20 @@ def get_recent_events(
 def get_proposal_trace(conn: sqlite3.Connection, proposal_id: str) -> ProposalTrace:
     """The full lineage of one proposal in one call; StoreError if it does not exist.
 
-    Reasoning is ordered by created_at (then rowid), decisions by decided_at,
-    approvals by requested_at, orders by updated_at and fills — every fill
-    of every order of the proposal — by filled_at, all oldest first.
+    Legs are ordered by leg_index; reasoning by created_at (then rowid),
+    decisions by decided_at, approvals by requested_at, orders by updated_at
+    and fills — every fill of every order of the proposal — by filled_at,
+    all oldest first. Reasoning rows reach the trace once
+    ``link_reasoning_to_proposal`` has attached them.
     """
     try:
         row = conn.execute("SELECT * FROM proposals WHERE id = ?", (proposal_id,)).fetchone()
         if row is None:
             raise StoreError("proposal trace (no such proposal)", proposal_id)
         key = (proposal_id,)
+        legs = conn.execute(
+            "SELECT * FROM proposal_legs WHERE proposal_id = ? ORDER BY leg_index", key
+        ).fetchall()
         reasoning = conn.execute(
             "SELECT * FROM reasoning WHERE proposal_id = ? ORDER BY created_at, rowid", key
         ).fetchall()
@@ -581,6 +782,7 @@ def get_proposal_trace(conn: sqlite3.Connection, proposal_id: str) -> ProposalTr
         ).fetchall()
         return ProposalTrace(
             proposal=_row_to_proposal(row),
+            legs=tuple(_row_to_leg(r) for r in legs),
             reasoning=tuple(_row_to_reasoning(r) for r in reasoning),
             decisions=tuple(_row_to_decision(r) for r in decisions),
             approvals=tuple(_row_to_approval(r) for r in approvals),

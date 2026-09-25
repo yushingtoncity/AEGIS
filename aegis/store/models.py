@@ -3,8 +3,9 @@
 One frozen pydantic model per table, plus ``ProposalTrace`` (the reassembled
 lineage of one proposal) and ``StoreStatus`` (what ``aegis.cli.db status``
 reports). The repository writes these verbatim and reads them back, so the
-column names in ``migrations/0001_initial.sql`` are exactly these field
-names.
+column names in ``migrations/`` (``0001_initial.sql``, with ``reasoning``
+rebuilt and ``proposal_legs`` added by ``0002_reasoning_cycles_and_legs.sql``)
+are exactly these field names.
 
 Conventions shared by every record:
 
@@ -23,13 +24,13 @@ Conventions shared by every record:
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from aegis.data.models import utcnow
+from aegis.data.models import OptionType, utcnow
 
 
 def new_id() -> str:
@@ -168,15 +169,55 @@ class Proposal(StoreRecord):
         return _upper_symbol(value)
 
 
-class Reasoning(StoreRecord):
-    """One agent stage's output behind a proposal (scan → thesis → proposal)."""
+class ProposalLeg(StoreRecord):
+    """One leg of an option proposal: the contract, the side and the size.
+
+    A single-leg option proposal has one leg; a spread or condor lists its
+    legs by ``leg_index`` (0-based, in the order the structure was resolved).
+    An equity proposal has none. ``expiration`` is stored as ISO text
+    (``date.isoformat()``).
+    """
 
     proposal_id: str
+    leg_index: int = Field(ge=0)
+    symbol: str
+    option_type: OptionType
+    side: OrderSide
+    quantity: float = Field(gt=0)
+    strike: float = Field(gt=0)
+    expiration: date
+
+    @field_validator("symbol")
+    @classmethod
+    def _upper(cls, value: str) -> str:
+        return _upper_symbol(value)
+
+
+class Reasoning(StoreRecord):
+    """One agent stage's output (scan → thesis → proposal) under its cycle.
+
+    ``cycle_id`` is set as the row is written, before any proposal exists;
+    ``proposal_id`` is filled in by ``repo.link_reasoning_to_proposal`` once
+    the cycle produces one and stays None for a NO_TRADE cycle. A row must
+    belong to at least one of the two — the table's CHECK says the same.
+    ``model_name`` and ``latency_ms`` describe the LLM call behind ``content``.
+    """
+
+    cycle_id: str | None = None
+    proposal_id: str | None = None
     stage: ReasoningStage
     created_at: datetime = Field(default_factory=utcnow)
     content: str
     tokens_in: int | None = None
     tokens_out: int | None = None
+    model_name: str | None = None
+    latency_ms: float | None = None
+
+    @model_validator(mode="after")
+    def _under_a_cycle_or_proposal(self) -> Reasoning:
+        if self.cycle_id is None and self.proposal_id is None:
+            raise ValueError("a reasoning row needs a cycle_id or a proposal_id (or both)")
+        return self
 
 
 class PolicyDecision(StoreRecord):
@@ -266,18 +307,37 @@ class Event(StoreRecord):
     payload: dict[str, Any] | None = None
 
 
+class TokenUsage(BaseModel):
+    """Token totals read back from the reasoning table: ``repo.get_token_usage``
+    (a UTC day), ``get_cycle_token_usage`` (one cycle) and
+    ``get_token_usage_by_model``. ``calls`` is the number of rows summed; a
+    NULL token count adds 0."""
+
+    model_config = ConfigDict(frozen=True)
+
+    tokens_in: int = 0
+    tokens_out: int = 0
+    calls: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.tokens_in + self.tokens_out
+
+
 class ProposalTrace(BaseModel):
     """The full lineage of one proposal, as ``repo.get_proposal_trace`` returns it.
 
     Every tuple is ordered oldest → newest (reasoning by created_at then
     rowid, decisions by decided_at, approvals by requested_at, orders by
     updated_at, fills by filled_at), so the latest item is always the last.
-    ``fills`` holds every fill of every order in ``orders``.
+    ``legs`` is by leg_index (empty for an equity proposal) and ``fills``
+    holds every fill of every order in ``orders``.
     """
 
     model_config = ConfigDict(frozen=True)
 
     proposal: Proposal
+    legs: tuple[ProposalLeg, ...] = ()
     reasoning: tuple[Reasoning, ...] = ()
     decisions: tuple[PolicyDecision, ...] = ()
     approvals: tuple[Approval, ...] = ()
@@ -307,7 +367,7 @@ class StoreStatus(BaseModel):
     applied_migrations: tuple[str, ...]
     pending_migrations: tuple[str, ...]
     row_counts: dict[str, int]
-    """Table name → row count for all nine tables (0 for a table that does not exist)."""
+    """Table name → row count for all ten tables (0 for a table that does not exist)."""
     missing_tables: tuple[str, ...] = ()
     """Tables a fully migrated database must have but lacks — one was dropped by hand.
 

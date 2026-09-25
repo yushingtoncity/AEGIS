@@ -1,0 +1,33 @@
+{
+  "outcome": "trade",
+  "proposal": {
+    "symbol": "SPY",
+    "instrument": "option",
+    "side": "buy",
+    "quantity": 2,
+    "order_type": "limit",
+    "limit_price": 4.55,
+    "thesis": "Buy the SPY 2026-08-21 640/645 call debit spread, two units at 4.55, for the post-Fed drift toward the 641.20 high to continue over the next 22 days. Defined risk of 910.00 USD against the 100,000.00 USD equity.",
+    "confidence": 0.58,
+    "invalidation": "A daily close below 630 before 2026-08-14.",
+    "legs": [
+      {
+        "symbol": "SPY260821C00640000",
+        "option_type": "call",
+        "side": "buy",
+        "quantity": 2,
+        "strike": 640,
+        "expiration": "2026-08-21"
+      },
+      {
+        "symbol": "SPY260821C00645000",
+        "option_type": "call",
+        "side": "sell",
+        "quantity": 2,
+        "strike": 645,
+        "expiration": "2026-08-21"
+      }
+    ]
+  },
+  "no_trade_reason": null
+}

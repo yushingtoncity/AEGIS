@@ -15,7 +15,14 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config.yaml"
@@ -123,6 +130,103 @@ class StoreConfig(BaseModel):
         return value.strip()
 
 
+_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+
+class BrainStageConfig(BaseModel):
+    """Model, output cap and effort for one brain stage.
+
+    ``effort`` is the current API's depth control (thinking is always on for
+    the 5.x models and counts toward ``max_tokens``); ``None`` omits it,
+    which Haiku 4.5 requires. There is no ``temperature``: the Messages API
+    no longer accepts sampling parameters for these models.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    model: str
+    max_tokens: int = Field(gt=0)
+    effort: str | None = None
+
+    @field_validator("model")
+    @classmethod
+    def _non_blank_model(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("model must not be blank")
+        return value.strip()
+
+    @field_validator("effort")
+    @classmethod
+    def _valid_effort(cls, value: str | None) -> str | None:
+        if value is not None and value not in _EFFORT_LEVELS:
+            raise ValueError(f"effort must be one of {_EFFORT_LEVELS} or null, got {value!r}")
+        return value
+
+
+class BrainStages(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scan: BrainStageConfig = BrainStageConfig(
+        model="claude-haiku-4-5-20251001", max_tokens=3000
+    )
+    thesis: BrainStageConfig = BrainStageConfig(
+        model="claude-opus-5-5", max_tokens=4000, effort="medium"
+    )
+    proposal: BrainStageConfig = BrainStageConfig(
+        model="claude-fable-5-1", max_tokens=3000, effort="low"
+    )
+
+
+class ModelPrice(BaseModel):
+    """USD per million tokens — placeholders used only for cost estimates."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    input: float = Field(ge=0)
+    output: float = Field(ge=0)
+
+
+class SnapshotConfig(BaseModel):
+    """How much market context the scan stage is shown per symbol."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    strikes_each_side: int = Field(default=5, ge=0)
+    headlines_per_symbol: int = Field(default=5, ge=0, le=50)
+    stale_after_minutes: float = Field(default=15, gt=0)
+    recent_proposals_limit: int = Field(default=10, ge=0)
+
+
+class BrainConfig(BaseModel):
+    """The Phase 4 agent brain: per-stage models, token budgets, price placeholders."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cadence_minutes: int = Field(default=30, gt=0)
+    max_retries: int = Field(default=3, ge=0)
+    per_cycle_token_cap: int = Field(default=60_000, gt=0)
+    daily_token_budget: int = Field(default=500_000, gt=0)
+    stages: BrainStages = BrainStages()
+    prices_per_mtok: dict[str, ModelPrice] = {}
+    snapshot: SnapshotConfig = SnapshotConfig()
+
+    @model_validator(mode="after")
+    def _daily_covers_a_cycle(self) -> "BrainConfig":
+        if self.daily_token_budget < self.per_cycle_token_cap:
+            raise ValueError(
+                "daily_token_budget must be at least per_cycle_token_cap "
+                f"({self.daily_token_budget} < {self.per_cycle_token_cap})"
+            )
+        return self
+
+    def stage(self, name: str) -> BrainStageConfig:
+        """The stage block by name ('scan', 'thesis', 'proposal')."""
+        try:
+            return getattr(self.stages, name)
+        except AttributeError as exc:
+            raise KeyError(f"unknown brain stage {name!r}") from exc
+
+
 class RiskLimits(BaseModel):
     """Risk limits enforced by the Phase 5 policy engine.
 
@@ -153,6 +257,7 @@ class AegisConfig(BaseModel):
     bars: BarsConfig = BarsConfig()
     pricing: PricingConfig = PricingConfig()
     store: StoreConfig = StoreConfig()
+    brain: BrainConfig = BrainConfig()
     risk_limits: RiskLimits = RiskLimits()
 
     @field_validator("watchlist")

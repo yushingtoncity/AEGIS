@@ -1,0 +1,32 @@
+{
+  "candidates": [
+    {
+      "symbol": "SPY",
+      "direction": "bullish",
+      "instrument": "option",
+      "structure": "call_debit_spread",
+      "expiration": "2026-08-21",
+      "strikes": [
+        640,
+        650
+      ],
+      "rationale": "SPY at 638.75 is grinding toward the 20-day high of 641.20 with the Fed on hold, and ATM implied vol of 18.45% is modest against a 3% 20-day range. A 640/650 call debit spread for 22 DTE pays roughly 4.55 per share at mid for a 10-point width, so the position needs a move above 644.55 by expiry to profit and caps the loss at the debit.",
+      "confidence": 0.58,
+      "key_risk": "A hawkish surprise or a growth scare sends SPY back through 630 before expiry and the spread expires worthless.",
+      "invalidation": ""
+    },
+    {
+      "symbol": "QQQ",
+      "direction": "bullish",
+      "instrument": "equity",
+      "structure": null,
+      "expiration": null,
+      "strikes": [],
+      "rationale": "QQQ at 561.30 is outperforming SPY over five sessions (+1.42% vs +0.85%) on the data-center capex catalyst, and it sits 1.0% below the 20-day high of 566.80. A small equity position captures the relative strength without paying 21.88% implied vol.",
+      "confidence": 0.5,
+      "key_risk": "The chipmaker rally reverses on the next earnings print and QQQ gives back the five-day gain.",
+      "invalidation": "A daily close below 555 before 2026-08-07."
+    }
+  ],
+  "no_idea_reason": null
+}

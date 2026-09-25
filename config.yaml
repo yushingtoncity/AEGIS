@@ -37,6 +37,62 @@ pricing:
 store:
   db_path: data/aegis.db
 
+# Phase 4 agent brain (aegis/brain): scan -> thesis -> proposal. The brain
+# only ever writes reasoning and proposal rows; it has no execution authority.
+brain:
+  cadence_minutes: 30            # stored now; the Phase 9 scheduler reads it
+  max_retries: 3                 # per LLM call: rate limits / transient errors, and per stage: invalid JSON fed back to the model
+
+  # Budget guard — same philosophy as the daily loss limit. Before every call
+  # the client sums today's reasoning-table tokens (in + out, UTC day) and
+  # this cycle's; if adding the call's estimated input plus max_tokens would
+  # cross either line the call is refused and a budget_halt event is logged.
+  # PLACEHOLDERS: measured 2026-09-24, a five-symbol cycle spends ~22k tokens
+  # when it declines at the thesis stage and ~30k with a proposal, so 60k
+  # absorbs a retry or two and 500k/day covers the ~13 cycles of a market day
+  # at cadence_minutes=30 with room for manual runs. Tune after a week.
+  per_cycle_token_cap: 60000
+  daily_token_budget: 500000
+
+  # One model per stage. temperature is deliberately absent: the current
+  # Messages API / anthropic 1.x SDK does not accept it for these models (400);
+  # effort (low|medium|high|xhigh|max) is the knob, and Haiku 4.5 takes none.
+  # Thinking is always on for Opus 5.5 / Fable 5.1 and its tokens count
+  # toward max_tokens, so keep effort modest where max_tokens is small.
+  stages:
+    scan:
+      model: claude-haiku-4-5-20251001
+      # Measured 2026-09-24: a terse five-symbol brief (scan-v2) needs ~1,700
+      # output tokens; 1,500 truncated it. Scale with the watchlist size.
+      max_tokens: 3000
+      effort: null
+    thesis:
+      model: claude-opus-5-5
+      # Measured 2026-09-24: one candidate on a two-symbol snapshot took 1,210
+      # tokens (thinking + JSON); up to five candidates need headroom.
+      max_tokens: 4000
+      effort: medium
+    proposal:
+      model: claude-fable-5-1
+      # Measured 2026-09-24: 800 truncated — thinking used ~670 before the
+      # ~500-token proposal JSON began.
+      max_tokens: 3000
+      effort: low
+
+  # PLACEHOLDERS for cost ESTIMATES only (USD per million tokens). Update from
+  # the official pricing page: https://platform.claude.com/docs/en/about-claude/pricing
+  prices_per_mtok:
+    claude-haiku-4-5-20251001: {input: 1.00, output: 5.00}
+    claude-opus-5-5: {input: 4.00, output: 20.00}
+    claude-fable-5-1: {input: 10.00, output: 50.00}
+
+  # What the scan stage sees per watchlist symbol.
+  snapshot:
+    strikes_each_side: 5          # ATM +/- N strikes of the nearest expiry, calls and puts
+    headlines_per_symbol: 5
+    stale_after_minutes: 15       # data older than this (or any data while closed) is flagged STALE
+    recent_proposals_limit: 10    # prior proposals shown to the thesis stage so it does not repeat itself
+
 # Placeholders enforced by the Phase 5 policy engine. Nothing reads these yet;
 # they are declared from day one so risk limits are versioned config, not code.
 risk_limits:
