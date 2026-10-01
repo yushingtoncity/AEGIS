@@ -38,6 +38,10 @@ file wins.
   request and let me review it.
 - **Tests:** `python -m pytest -q`. Tests use fixtures only and never call a
   live API. Record the passing count before and after a change and report both.
+- **Use Python 3.14**, matching the mini. If the environment has an older
+  default, create the venv with `uv venv -p 3.14`. On Python 3.13,
+  `test_the_harness_catches_a_child_process[multiprocessing-spawn]` in
+  `tests/test_brain_architecture.py` fails, so a 3.13 baseline is not clean.
 - **Live checks run on the mini, not in the cloud.** Anything that needs Alpaca
   keys (`python -m aegis.cli.check`, real paper orders) goes in the pull request
   as a checklist for me to run.
