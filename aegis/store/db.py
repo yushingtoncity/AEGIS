@@ -17,12 +17,14 @@ its script — an explicit ``BEGIN`` followed by ``executescript`` therefore
 ends the transaction, and the DDL and the ``schema_version`` row would
 commit separately. ``migrate`` instead splits each ``.sql`` file into single
 statements with ``sqlite3.complete_statement`` (which respects ``;`` inside
-string literals and comments) and runs them through ``Connection.execute``
-inside one ``BEGIN IMMEDIATE … COMMIT`` together with the version row, so a
-migration lands whole or not at all. (The 3.12+ ``autocommit=True`` mode
-would keep the transaction open across ``executescript``, but changes the
-transaction semantics of the whole connection; splitting keeps the
-connection contract simple.) The statements are idempotent regardless.
+string literals, comments and a trigger's ``BEGIN … END`` body — 0003's
+no-delete trigger stays one statement) and runs them through
+``Connection.execute`` inside one ``BEGIN IMMEDIATE … COMMIT`` together with
+the version row, so a migration lands whole or not at all. (The 3.12+
+``autocommit=True`` mode would keep the transaction open across
+``executescript``, but changes the transaction semantics of the whole
+connection; splitting keeps the connection contract simple.) The statements
+are idempotent regardless.
 """
 
 from __future__ import annotations
@@ -54,6 +56,7 @@ TABLES: tuple[str, ...] = (
     "position_snapshots",
     "pnl_snapshots",
     "events",
+    "controls",
 )
 
 # One literal query per table: table names never come from user input and
@@ -69,6 +72,7 @@ _COUNT_QUERIES: dict[str, str] = {
     "position_snapshots": "SELECT COUNT(*) FROM position_snapshots",
     "pnl_snapshots": "SELECT COUNT(*) FROM pnl_snapshots",
     "events": "SELECT COUNT(*) FROM events",
+    "controls": "SELECT COUNT(*) FROM controls",
 }
 
 _MIGRATION_FILE_RE = re.compile(r"^(\d{4})_([a-z0-9_]+)\.sql$")

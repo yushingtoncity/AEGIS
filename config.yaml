@@ -93,10 +93,48 @@ brain:
     stale_after_minutes: 15       # data older than this (or any data while closed) is flagged STALE
     recent_proposals_limit: 10    # prior proposals shown to the thesis stage so it does not repeat itself
 
-# Placeholders enforced by the Phase 5 policy engine. Nothing reads these yet;
-# they are declared from day one so risk limits are versioned config, not code.
+# Risk limits enforced by the Phase 5 policy engine (aegis/policy) — the
+# deterministic gate between a proposal and any order. The engine runs all
+# twenty rules on every proposal and nothing in aegis/policy hardcodes a
+# number: every limit is read from this block.
+#
+# EVERY VALUE BELOW IS A PLACEHOLDER sized for the $100k PAPER account. Live
+# sizing gets revisited before Phase 11; do not carry these numbers to a live
+# account unreviewed.
 risk_limits:
-  max_position_pct: 5.0        # max % of equity in any single position
-  max_open_positions: 5
-  daily_loss_limit_pct: 2.0    # halt for the day past this drawdown
-  no_trade_list: []            # symbols the policy engine must never trade
+  # --- account-level stops -----------------------------------------------
+  # Today's P&L at or below this % of start-of-day equity: REJECT, and halt
+  # until the next market open — or, when the limit trips before the day's
+  # session opens, until that session's close.
+  daily_loss_limit_pct: 2.0
+  halt_fallback_hours: 24        # halt length when the limit trips but the market clock (next open) is unavailable
+  max_daily_trades: 10           # orders sent to the broker per trading day; at the cap, REJECT
+  max_open_positions: 5          # distinct underlyings held or pending; at the cap, a NEW underlying is REJECTed
+
+  # --- what may be traded ------------------------------------------------
+  no_trade_list: []              # symbols (and underlyings) that are always REJECTed
+  watchlist_only: true           # REJECT anything whose underlying is not in the watchlist above
+
+  # --- sizing ------------------------------------------------------------
+  max_position_pct: 5.0          # this proposal's notional + existing exposure in the underlying, as % of equity
+
+  # --- order hygiene -----------------------------------------------------
+  duplicate_window_minutes: 60   # same symbol + instrument + side inside this window is a duplicate
+  allow_market_orders: false     # market orders are REJECTed unless true
+  limit_price_tolerance_pct: 5.0 # a limit further than this from the current mid is REJECTed
+
+  # --- options -----------------------------------------------------------
+  # min_dte counts calendar days from the trading date to expiration: 1
+  # rejects same-day (0DTE) contracts and nothing else. The brain currently
+  # reads the nearest expiration, usually 0-1 DTE on these tickers, so a
+  # stricter value here should be paired with a later chain on the brain side.
+  min_dte: 1
+  max_loss_per_trade: 1000.0     # USD at risk for the whole structure; unlimited risk is REJECTed whatever this says
+  max_contracts: 10              # per leg
+
+  # --- tiers -------------------------------------------------------------
+  reject_short_sales: false      # an equity sell that does not close a long: false = needs approval, true = REJECT
+  min_confidence: 0.5            # below this the proposal is recorded and flagged, never executed
+  auto_execute:                  # the only path to an order without a human: equity, limit, watchlist, small
+    enabled: true                # paper default; options never auto-execute in this phase
+    max_notional: 1000.0         # USD

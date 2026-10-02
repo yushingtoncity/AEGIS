@@ -412,14 +412,23 @@ class Position(BaseModel):
 
 class AccountState(FetchedModel):
     """Paper account status. Alpaca sends monetary fields as strings; they
-    are converted to floats here (None when absent)."""
+    are converted to floats here (None when absent).
+
+    ``last_equity`` is the equity at the previous trading day's close — the
+    start-of-day figure today's P&L is measured from (``equity -
+    last_equity``). ``options_buying_power`` is what option orders may
+    spend: options cannot be bought on margin, so it is usually far below
+    ``buying_power``.
+    """
 
     account_number: str
     status: str
     currency: str | None = None
     equity: float | None = None
+    last_equity: float | None = None
     cash: float | None = None
     buying_power: float | None = None
+    options_buying_power: float | None = None
     portfolio_value: float | None = None
     positions: list[Position] = Field(default_factory=list)
 
@@ -440,8 +449,10 @@ class AccountState(FetchedModel):
             status=_enum_str(payload.get("status")) or "UNKNOWN",
             currency=payload.get("currency"),
             equity=_to_float(payload.get("equity")),
+            last_equity=_to_float(payload.get("last_equity")),
             cash=_to_float(payload.get("cash")),
             buying_power=_to_float(payload.get("buying_power")),
+            options_buying_power=_to_float(payload.get("options_buying_power")),
             portfolio_value=_to_float(payload.get("portfolio_value")),
             positions=[Position.from_alpaca(p) for p in positions or []],
             **({} if fetched_at is None else {"fetched_at": fetched_at}),

@@ -196,3 +196,68 @@ def test_shipped_brain_block_prices_cover_every_stage_model():
 def test_invalid_brain_blocks_rejected(tmp_path, text):
     with pytest.raises(ConfigError):
         load_config(write(tmp_path, MINIMAL + text))
+
+
+def test_risk_limits_defaults(tmp_path):
+    limits = load_config(write(tmp_path, MINIMAL)).risk_limits
+    assert (limits.daily_loss_limit_pct, limits.halt_fallback_hours) == (2.0, 24.0)
+    assert (limits.max_daily_trades, limits.max_open_positions) == (10, 5)
+    assert (limits.no_trade_list, limits.watchlist_only) == ([], True)
+    assert limits.max_position_pct == 5.0
+    assert (limits.duplicate_window_minutes, limits.allow_market_orders) == (60, False)
+    assert limits.limit_price_tolerance_pct == 5.0
+    assert (limits.min_dte, limits.max_loss_per_trade, limits.max_contracts) == (1, 1000.0, 10)
+    assert (limits.reject_short_sales, limits.min_confidence) == (False, 0.5)
+    assert (limits.auto_execute.enabled, limits.auto_execute.max_notional) == (True, 1000.0)
+
+
+def test_shipped_risk_limits_match_the_code_defaults():
+    """config.yaml states every limit explicitly; none silently rides on a default."""
+    import yaml
+
+    from aegis.config import RiskLimits
+
+    shipped = load_config(DEFAULT_CONFIG_PATH).risk_limits
+    assert shipped == RiskLimits()
+    block = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))["risk_limits"]
+    assert set(block) == set(RiskLimits.model_fields)
+    assert set(block["auto_execute"]) == {"enabled", "max_notional"}
+
+
+def test_risk_limits_are_frozen(tmp_path):
+    limits = load_config(write(tmp_path, MINIMAL)).risk_limits
+    with pytest.raises(Exception):
+        limits.max_position_pct = 100.0
+    with pytest.raises(Exception):
+        limits.auto_execute.enabled = False
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "risk_limits:\n  daily_loss_limit_pct: 0\n",
+        "risk_limits:\n  halt_fallback_hours: 0\n",
+        "risk_limits:\n  max_daily_trades: -1\n",
+        "risk_limits:\n  duplicate_window_minutes: -5\n",
+        "risk_limits:\n  limit_price_tolerance_pct: -1\n",
+        "risk_limits:\n  min_dte: -1\n",
+        "risk_limits:\n  max_loss_per_trade: -1\n",
+        "risk_limits:\n  max_contracts: -1\n",
+        "risk_limits:\n  min_confidence: 1.5\n",
+        "risk_limits:\n  auto_execute:\n    max_notional: -1\n",
+        "risk_limits:\n  auto_execute:\n    surprise: true\n",
+        "risk_limits:\n  allow_market_orders: maybe\n",
+        "risk_limits:\n  max_notional: 10\n",
+        # a non-finite number would switch the limit off without saying so
+        "risk_limits:\n  max_loss_per_trade: .inf\n",
+        "risk_limits:\n  limit_price_tolerance_pct: .inf\n",
+        "risk_limits:\n  halt_fallback_hours: .inf\n",
+        "risk_limits:\n  max_position_pct: .nan\n",
+        "risk_limits:\n  min_confidence: .nan\n",
+        "risk_limits:\n  auto_execute:\n    max_notional: .inf\n",
+        "risk_limits:\n  auto_execute:\n    max_notional: .nan\n",
+    ],
+)
+def test_invalid_risk_limits_rejected(tmp_path, text):
+    with pytest.raises(ConfigError):
+        load_config(write(tmp_path, MINIMAL + text))

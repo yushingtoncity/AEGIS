@@ -197,7 +197,9 @@ class TestAccountState:
         assert "PA3ABCD" not in state.masked_account_number
         assert state.status == "ACTIVE"
         assert state.equity == 100000.0  # converted from Alpaca's strings
+        assert state.last_equity == 99251.1  # the previous close: today's P&L is measured from it
         assert state.buying_power == 200000.0
+        assert state.options_buying_power == 25000.5  # options are never bought on margin
         assert state.cash == 25000.5
         assert len(state.positions) == 1
         position = state.positions[0]
@@ -209,6 +211,7 @@ class TestAccountState:
     def test_missing_fields(self):
         state = AccountState.from_alpaca({"account_number": "X1", "status": "ACTIVE"})
         assert state.equity is None
+        assert state.last_equity is None and state.options_buying_power is None
         assert state.positions == []
         assert state.masked_account_number == "****X1"
 

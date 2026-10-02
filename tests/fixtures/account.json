@@ -6,6 +6,7 @@
     "crypto_status": "ACTIVE",
     "currency": "USD",
     "buying_power": "200000.00",
+    "options_buying_power": "25000.50",
     "cash": "25000.50",
     "portfolio_value": "100000.00",
     "equity": "100000.00",
