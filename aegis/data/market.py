@@ -247,7 +247,7 @@ def get_option_chain(
     if isinstance(expiration, str):
         expiration = date.fromisoformat(expiration)
     if expiration is None and eligible is not None:
-        listed = list_expirations(underlying)
+        listed = sorted(set(list_expirations(underlying)))
         expiration = next((listed_date for listed_date in listed if eligible(listed_date)), None)
         if expiration is None:
             raise NoEligibleExpiration(underlying, tuple(listed))

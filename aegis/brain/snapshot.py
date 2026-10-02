@@ -28,8 +28,10 @@ the exchange close on expiration day — in whole days, rounded down
 of calendar days from the trading date, and it is never more than that
 count, so a chain the brain picks is never one ``options_min_dte`` rejects.
 The data layer lists the expirations and fetches the chain
-(``get_option_chain(symbol, eligible=...)``); this module decides which
-dates qualify, and checks the chain it gets back. With no expiration in the
+(``get_option_chain(symbol, eligible=...)``): ``in_dte_window`` decides
+which dates qualify and the data layer takes the nearest of them, which is
+``eligible_expiration`` over the listing. This module then checks the chain
+it gets back, and keeps only the contracts of that expiration. With no expiration in the
 window the symbol gets a ``no eligible expiration`` line in its errors and
 no chain — never a nearer expiration — and the cycle goes on.
 
@@ -617,6 +619,17 @@ def _fetch_symbol(
             )
         )
         chain = None
+    if chain is not None:
+        # Only that expiration's contracts go on: a contract the vendor
+        # listed under another date (or none) never reaches the thesis stage.
+        kept = [c for c in chain.contracts if c.expiration == chain.expiration]
+        if len(kept) < len(chain.contracts):
+            dropped = len(chain.contracts) - len(kept)
+            errors.append(
+                f"{dropped} contract(s) in the {chain.expiration.isoformat()} chain expire "
+                "on another date or none: left out"
+            )
+            chain = chain.model_copy(update={"contracts": kept})
     if chain is not None:
         # The chain fetch tolerates a missing underlying quote (chain.spot
         # None); our own spot quote is the fallback for the model IV/Greeks.

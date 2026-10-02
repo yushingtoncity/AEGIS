@@ -88,7 +88,7 @@ brain:
 
   # What the scan stage sees per watchlist symbol.
   snapshot:
-    strikes_each_side: 5          # ATM +/- N strikes of the nearest expiry, calls and puts
+    strikes_each_side: 5          # ATM +/- N strikes of the chain's expiration (see max_dte below), calls and puts
     headlines_per_symbol: 5
     stale_after_minutes: 15       # data older than this (or any data while closed) is flagged STALE
     recent_proposals_limit: 10    # prior proposals shown to the thesis stage so it does not repeat itself

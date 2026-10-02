@@ -365,7 +365,7 @@ def quote_age(
     stamped = quote.quote_time
     if stamped is None:
         return None
-    if stamped.tzinfo is None:
+    if stamped.utcoffset() is None:  # naive, or a tzinfo that names no offset
         stamped = stamped.replace(tzinfo=timezone.utc)
     return known((context.now - stamped).total_seconds())
 

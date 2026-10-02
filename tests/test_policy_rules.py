@@ -12,7 +12,7 @@ factories every later policy test builds on.
 import ast
 import random
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -3421,6 +3421,18 @@ class TestQuoteAge:
 
     def test_a_quote_stamped_after_the_as_of_time_is_negative(self):
         assert measures.quote_age(make_quote(at=NOW + timedelta(seconds=3)), make_context()) == -3.0
+
+    def test_a_tzinfo_that_names_no_offset_is_taken_as_utc_never_raises(self):
+        class Unnamed(tzinfo):
+            def utcoffset(self, dt):
+                return None
+
+        odd = make_quote().model_copy(
+            update={"quote_time": datetime(2026, 7, 30, 14, 58, tzinfo=Unnamed())}
+        )
+        assert measures.quote_age(odd, make_context()) == 120.0
+        result = run(rules.quote_freshness, make_proposal(), make_context(quote=odd))
+        assert result.outcome is PASS and "120s old" in result.detail
 
     def test_a_naive_timestamp_is_utc_and_any_offset_is_converted(self):
         naive = make_quote().model_copy(update={"quote_time": datetime(2026, 7, 30, 14, 58)})

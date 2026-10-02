@@ -223,7 +223,7 @@ def layer(monkeypatch, fixture):
         listed = state.listed.get(underlying)
         if isinstance(listed, Exception):
             raise listed
-        return sorted(listed or [])
+        return list(listed or [])  # in whatever order the test gave it
 
     monkeypatch.setattr(market, "list_expirations", list_expirations)
     monkeypatch.setattr(market, "_fetch_contracts", lambda underlying, expiration: [])
@@ -259,6 +259,29 @@ class TestGetOptionChainEligible:
         assert caught.value.listed == tuple(listed)
         assert str(caught.value) == "failed to fetch option chain (no eligible expiration) for SPY"
         assert layer.client.chain_requests == []
+
+    def test_the_listing_order_and_repeats_do_not_matter(self, layer):
+        layer.listed["SPY"] = [days(15), days(8), days(1), days(8), days(0)]
+        assert market.get_option_chain("SPY", eligible=window()).expiration == days(8)
+
+    def test_the_live_pick_is_eligible_expiration_over_the_listing(self, layer):
+        """The data layer applies the brain's test nearest-first: what it
+        fetches is what ``eligible_expiration`` picks from the same listing."""
+        rng = random.Random(20261003)
+        checked = 0
+        for _ in range(300):
+            default_cache.clear()
+            listed = [days(rng.randrange(-2, 70)) for _ in range(rng.randrange(0, 7))]
+            floor, cap = rng.choice((0, 1, 7, 10)), rng.choice((7, 20, 45))
+            layer.listed["SPY"] = listed
+            expected = eligible_expiration(listed, now=NOW, min_dte=floor, max_dte=cap)
+            try:
+                got = market.get_option_chain("SPY", eligible=window(floor, cap)).expiration
+            except NoEligibleExpiration:
+                got = None
+            assert got == expected, (listed, floor, cap)
+            checked += got is not None
+        assert checked >= 100
 
     def test_without_eligible_the_nearest_is_fetched_as_before(self, layer):
         layer.listed["SPY"] = [days(n) for n in (0, 1, 3, 8, 15)]
@@ -402,6 +425,27 @@ class TestSnapshotExpiration:
             # the window was offered: it accepts 7 and 45 days out, nothing nearer or later
             (eligible,) = asked
             assert [eligible(days(n)) for n in (6, 7, 45, 46)] == [False, True, True, False]
+
+    def test_a_contract_of_another_expiration_never_reaches_the_brain(self, feed, monkeypatch):
+        """An eligible chain that carries a contract listed under another
+        date: that contract is left out, so no candidate can resolve to it."""
+        real = market.get_option_chain
+
+        def mixed(symbol, expiration=None, *, eligible=None):
+            chain = real(symbol, expiration, eligible=eligible)
+            stray = real(symbol, days(1)).contracts[:2]  # a 1 DTE call and put
+            return chain.model_copy(update={"contracts": [*chain.contracts, *stray]})
+
+        monkeypatch.setattr(snapshot_module, "get_option_chain", mixed)
+        feed.listed = {"SPY": [days(1), days(8)]}
+        spy = build_market_snapshot(["SPY"], config=config(), now=NOW).symbols[0]
+        assert spy.chain is not None and spy.chain.expiration == days(8)
+        assert {c.expiration for c in spy.chain.contracts} == {days(8)}
+        assert not any(days(1).strftime("%y%m%d") in c.symbol for c in spy.chain.contracts)
+        assert spy.errors == (
+            f"2 contract(s) in the {days(8).isoformat()} chain expire on another date or none: "
+            "left out",
+        )
 
     def test_other_fetch_failures_are_unchanged(self, feed):
         feed.listed = {"SPY": DataError("option contracts", "SPY")}

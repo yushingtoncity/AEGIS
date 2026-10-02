@@ -45,7 +45,8 @@ would have made every option idea die at `options_min_dte`.
   its place.
 - The snapshot also checks the chain it gets back: a chain outside the window
   is refused with `... the chain fetched expires YYYY-MM-DD, at N DTE; option
-  chain omitted`.
+  chain omitted`, and a contract inside an eligible chain that is listed
+  under another expiration (or none) is left out, with a warning.
 - The thesis stage only ever sees the one chain per symbol, and
   `validate_candidates` already refuses an option candidate on any other
   expiration, so every candidate comes from the eligible expiration.
@@ -53,8 +54,9 @@ would have made every option idea die at `options_min_dte`.
 **Where the selection lives, and why there.** The brain decides which dates
 qualify; the data layer fetches. `aegis.data.market.get_option_chain` gained
 a keyword-only `eligible: Callable[[date], bool]`: with no explicit
-expiration it reads the listing, fetches the nearest date `eligible` accepts,
-and raises `NoEligibleExpiration` (a `DataError` subclass carrying the
+expiration it reads the listing, sorts it, fetches the nearest date `eligible`
+accepts (that is `eligible_expiration` over the listing; a seeded test pins
+the two together), and raises `NoEligibleExpiration` (a `DataError` subclass carrying the
 listing) when it accepts none. Every other caller is unchanged.
 
 The obvious alternative, having the brain call `list_expirations` itself,
@@ -108,6 +110,33 @@ amounts: `build_context` reads the clock before it fetches quotes, so a
 real-time quote is routinely a little ahead. Bounding it would need a new
 tunable, which this change does not add.
 
+## Independent review
+
+A separate review of the diff found no fail-open path. It reported five
+low-severity findings, each with a probe. Four were fixed in this branch,
+each with a test that fails without the fix (mutations R1 to R3 below):
+
+1. A contract listed under another expiration inside an eligible chain
+   reached the brain, because only the chain's date was checked. Such
+   contracts are now left out. `options_min_dte` would have rejected the
+   trade, but the brain should not see the contract at all.
+2. `quote_age` tested `tzinfo is None` rather than `utcoffset() is None`, so
+   a tzinfo that names no offset made the rule raise. The engine turned that
+   into a REJECT, but a rule must never raise. Fixed.
+3. The live selection relied on `list_expirations` returning a sorted
+   listing, while `eligible_expiration` (what the tests exercised) was not
+   on the live path. The data layer now sorts the listing itself, and a
+   seeded test shows the live pick equals `eligible_expiration` over the same
+   listing.
+4. A stale config.yaml comment on `strikes_each_side` still said "nearest
+   expiry". Fixed.
+
+The fifth, refusing a config whose `brain.snapshot.max_dte` is below
+`risk_limits.min_dte`, is left as it is on purpose. Such a config already
+fails closed: every symbol gets a `no eligible expiration (7-3 DTE, ...)`
+warning and no chain. Refusing it at load would let a brain display setting
+block a stricter risk limit, and the policy CLI along with it.
+
 ## How the counts changed
 
 Everything that said twenty now says twenty-one: the engine's and the
@@ -151,14 +180,17 @@ are untouched and pass.
   fetched, none accepted raises and fetches nothing, explicit expiration not
   second-guessed, cache keyed by the date chosen); the snapshot end to end over
   the real `get_option_chain` with only the Alpaca client and listings faked;
-  a chain outside the window refused; the thesis prompt and
+  a chain outside the window refused; a contract listed under another
+  expiration left out of an eligible chain; the live pick equal to
+  `eligible_expiration` over the same listing, in any order; the thesis prompt and
   `validate_candidates` only admitting the eligible expiration; a full FakeLLM
   cycle running on with one symbol that has no eligible expiration.
 - `tests/test_policy_rules.py`: `TestPricedQuotes`, `TestQuoteAge`,
   `TestQuoteFreshness` (fresh passes; one second over rejects; exactly at the
   limit passes; float noise at the limit; missing timestamp rejects; missing
   quote and wrong-symbol quote reject; `fetched_at` and the last trade are
-  ignored; one stale leg among fresh legs rejects and names only that leg;
+  ignored; a tzinfo that names no offset is UTC and never raises; one stale
+  leg among fresh legs rejects and names only that leg;
   every offending leg named; each instrument held to its own limit; limits
   from the config; a zero limit; a market order held to the same limit; the
   staleness named as `failing_rule` ahead of a bad price).
@@ -183,8 +215,8 @@ import; `uv` was upgraded to get the 3.14.8 release.)
 | | Passed | Skipped |
 | - | - | - |
 | Baseline, `main` at `f8f361b` | 4429 | 1 |
-| This branch, `python -m pytest -q` | 4517 | 1 |
-| This branch, `python -W error -m pytest -q` | 4517 | 1 |
+| This branch, `python -m pytest -q` | 4521 | 1 |
+| This branch, `python -W error -m pytest -q` | 4521 | 1 |
 
 The one skip is a case-insensitive-file-system check in
 `tests/test_brain_architecture.py`; the cloud container's file system is
@@ -196,23 +228,26 @@ Following the Phase 5 recipe: a scratch copy of `aegis/`, `tests/`,
 `conftest.py`, `config.yaml` and `.gitignore`; one exact text replacement at
 a time; the whole `tests/` directory run with `-x`, minus the two
 fresh-interpreter architecture suites (they test imports, not this logic).
-The unmutated copy passed first (3,068 tests). KILLED means the suite failed.
+Each run first checks that the unmutated copy passes. KILLED means the suite
+failed.
 
-**Round 1: 41 of 42 killed.** The survivor was QF3 (`exceeds(age, limit)`
-replaced by a plain `age > limit`). The float-noise test was vacuous: venue
-timestamps resolve to the microsecond, so a quote dated `120 + 1e-9` s back
-is exactly 120 s old. The guard is relative, so it only shows under a large
-limit. The test now checks that, under a limit of a billion seconds, half a
-second past is noise and two seconds past rejects, and that a millisecond
-over the shipped limits rejects.
+- **Round 1: 41 of 42 killed.** The survivor was QF3: `exceeds(age, limit)`
+  replaced by a plain `age > limit`. The float-noise test was vacuous,
+  because venue timestamps resolve to the microsecond, so a quote dated
+  `120 + 1e-9` s back is exactly 120 s old. The guard is relative, so it only
+  shows under a large limit. The test now checks that, under a limit of a
+  billion seconds, half a second past is noise and two seconds past rejects,
+  and that a millisecond over either shipped limit rejects. Re-run against
+  the fixed test, QF3 was killed.
+- **Round 2: the review's fixes reverted (R1 to R3): 3 of 3 killed.**
+- **Final run, all 45 against the final tree: 45 of 45 killed** (the
+  unmutated copy passed first: 3,072 tests).
 
-**Round 2 (QF3 against the fixed test): killed. Final: 42 of 42.**
-
-| # | File | Mutation | Result |
-| - | ---- | -------- | ------ |
+| # | File | Mutation | Final |
+| - | ---- | -------- | ----- |
 | QF1 | `aegis/policy/rules.py` | threshold one second looser | KILLED |
 | QF2 | `aegis/policy/rules.py` | at the threshold rejects (>=) | KILLED |
-| QF3 | `aegis/policy/rules.py` | no float-noise guard (>) | SURVIVED in round 1; KILLED in round 2 |
+| QF3 | `aegis/policy/rules.py` | no float-noise guard (>) | KILLED (survived round 1; see above) |
 | QF4 | `aegis/policy/rules.py` | future-dated quote judged by `abs(age)` | KILLED |
 | QF5 | `aegis/policy/rules.py` | undated quote counts as fresh | KILLED |
 | QF6 | `aegis/policy/rules.py` | missing quote counts as fresh | KILLED |
@@ -251,6 +286,9 @@ over the shipped limits rejects.
 | D1 | `aegis/data/market.py` | nothing eligible falls back to the nearest listed | KILLED |
 | D2 | `aegis/data/market.py` | eligible ignored | KILLED |
 | D3 | `aegis/data/market.py` | the listing is not reported | KILLED |
+| R1 | `aegis/brain/snapshot.py` | off-expiry contracts kept in an eligible chain | KILLED |
+| R2 | `aegis/policy/measures.py` | naive test by tzinfo, not utcoffset | KILLED |
+| R3 | `aegis/data/market.py` | the listing is trusted to be sorted | KILLED |
 | D4 | `aegis/data/market.py` | an explicit expiration is second-guessed | KILLED |
 
 ## Run on the mini after merge
@@ -258,9 +296,9 @@ over the shipped limits rejects.
 No live API call was made from the cloud session; there are no keys there.
 
 1. `git checkout main && git pull && source .venv/bin/activate`
-2. `python -m pytest -q`: expect 4518 passed on a case-insensitive file
+2. `python -m pytest -q`: expect 4522 passed on a case-insensitive file
    system (the macOS default), where the one test skipped in the cloud runs;
-   4517 passed and 1 skipped on a case-sensitive one
+   4521 passed and 1 skipped on a case-sensitive one
 3. `python -m aegis.cli.policy limits`
 4. During market hours: `python -m aegis.cli.brain once`, and confirm the
    brief shows chains at 7 or more DTE

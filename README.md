@@ -259,7 +259,8 @@ copied into the brain's block, so the brain and the policy engine's
 - The data layer does the fetching: `get_option_chain(symbol,
   eligible=...)` reads the expiration listing and fetches only the nearest
   date the brain's test accepts. The snapshot then checks the chain it got
-  back and refuses one outside the window.
+  back, refuses one outside the window, and leaves out any contract in it
+  that is listed under another expiration.
 - **No eligible expiration** (nothing listed between the floor and the cap)
   is a data warning, not an error: the symbol gets a `no eligible expiration
   (7-45 DTE, risk_limits.min_dte, brain.snapshot.max_dte): …; option chain
