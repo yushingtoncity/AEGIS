@@ -88,14 +88,23 @@ brain:
 
   # What the scan stage sees per watchlist symbol.
   snapshot:
-    strikes_each_side: 5          # ATM +/- N strikes of the nearest expiry, calls and puts
+    strikes_each_side: 5          # ATM +/- N strikes of the chain's expiration (see max_dte below), calls and puts
     headlines_per_symbol: 5
     stale_after_minutes: 15       # data older than this (or any data while closed) is flagged STALE
     recent_proposals_limit: 10    # prior proposals shown to the thesis stage so it does not repeat itself
+    # Each symbol's chain is the NEAREST expiration whose DTE (whole calendar
+    # days to the 16:00 New York close, the pricing engine's convention) is at
+    # least risk_limits.min_dte -- read from there, so the brain and the policy
+    # engine share one floor -- and at most max_dte. PLACEHOLDER: 45 (about
+    # six weeks) is wide enough that every watchlist name, all of which list
+    # weekly expirations, has several in the window, and short enough to keep
+    # the chain near-dated. With no expiration in the window the symbol gets
+    # a "no eligible expiration" warning and no chain (never a nearer one).
+    max_dte: 45
 
 # Risk limits enforced by the Phase 5 policy engine (aegis/policy) — the
 # deterministic gate between a proposal and any order. The engine runs all
-# twenty rules on every proposal and nothing in aegis/policy hardcodes a
+# twenty-one rules on every proposal and nothing in aegis/policy hardcodes a
 # number: every limit is read from this block.
 #
 # EVERY VALUE BELOW IS A PLACEHOLDER sized for the $100k PAPER account. Live
@@ -122,13 +131,23 @@ risk_limits:
   duplicate_window_minutes: 60   # same symbol + instrument + side inside this window is a duplicate
   allow_market_orders: false     # market orders are REJECTed unless true
   limit_price_tolerance_pct: 5.0 # a limit further than this from the current mid is REJECTed
+  # quote_freshness: a quote the limit-price check depends on (the equity's
+  # own, or every option leg's) older than this is REJECTed, so a limit is
+  # never judged against a stale mid. Age runs from the quote's venue
+  # timestamp to the moment the context was built; a quote with no timestamp
+  # is REJECTed too.
+  max_quote_age_seconds:
+    equity: 120                  # IEX quotes are real-time; two minutes is an old book on a watchlist name
+    option: 1200                 # free-plan option quotes run ~900 s behind (indicative feed): 20 min clears that delay with ~5 min to spare
 
   # --- options -----------------------------------------------------------
-  # min_dte counts calendar days from the trading date to expiration: 1
-  # rejects same-day (0DTE) contracts and nothing else. The brain currently
-  # reads the nearest expiration, usually 0-1 DTE on these tickers, so a
-  # stricter value here should be paired with a later chain on the brain side.
-  min_dte: 1
+  # min_dte counts calendar days from the trading date to expiration. 7
+  # keeps option ideas out of the gamma-heavy last week, where a small move
+  # in the underlying swings the position hardest and the free feed's
+  # 15-minute delay matters most. The brain picks its chain from the nearest
+  # expiration at or above this same value (brain.snapshot above), so an
+  # option idea is never built on a contract this rule would reject.
+  min_dte: 7
   max_loss_per_trade: 1000.0     # USD at risk for the whole structure; unlimited risk is REJECTed whatever this says
   max_contracts: 10              # per leg
 

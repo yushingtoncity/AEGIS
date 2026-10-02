@@ -17,6 +17,24 @@ The fetchers are called through this module's globals (``get_spot`` etc.),
 so a test replaces them with ``monkeypatch.setattr(aegis.brain.snapshot,
 "get_spot", fake)`` and never reaches Alpaca.
 
+Which expiration: each symbol's chain is the NEAREST listed expiration
+whose DTE is at least ``risk_limits.min_dte`` and at most
+``brain.snapshot.max_dte`` (``eligible_expiration``). The floor is read
+from ``risk_limits`` itself, so the brain and the policy engine's
+``options_min_dte`` share one number. DTE here is the pricing engine's
+calendar-day convention — ``calendar_days_to_expiry``, fractional days to
+the exchange close on expiration day — in whole days, rounded down
+(``whole_days_to_expiry``): during the session that is the policy's count
+of calendar days from the trading date, and it is never more than that
+count, so a chain the brain picks is never one ``options_min_dte`` rejects.
+The data layer lists the expirations and fetches the chain
+(``get_option_chain(symbol, eligible=...)``): ``in_dte_window`` decides
+which dates qualify and the data layer takes the nearest of them, which is
+``eligible_expiration`` over the listing. This module then checks the chain
+it gets back, and keeps only the contracts of that expiration. With no expiration in the
+window the symbol gets a ``no eligible expiration`` line in its errors and
+no chain — never a nearer expiration — and the cycle goes on.
+
 Failure policy: a fetch that fails for one symbol (``DataError``,
 ``ConfigError``, or a ``PricingError`` from enrichment) becomes an entry in
 that ``SymbolSnapshot.errors`` and the symbol still appears, so one broken
@@ -37,9 +55,10 @@ never drop them.
 
 from __future__ import annotations
 
+import math
 import warnings
-from collections.abc import Sequence
-from datetime import datetime, timedelta, timezone
+from collections.abc import Callable, Iterable, Sequence
+from datetime import date, datetime, timedelta, timezone
 
 from aegis.brain.errors import BrainError
 from aegis.brain.models import (
@@ -53,7 +72,7 @@ from aegis.brain.models import (
     SymbolSnapshot,
 )
 from aegis.config import AegisConfig, ConfigError, get_config
-from aegis.data.errors import DataError
+from aegis.data.errors import DataError, NoEligibleExpiration
 from aegis.data.models import (
     AccountState,
     Bar,
@@ -97,6 +116,10 @@ CLOCK_UNKNOWN_WARNING = (
     "market status UNKNOWN — the market clock could not be fetched; "
     "treating all data as potentially STALE"
 )
+NO_ELIGIBLE_EXPIRATION = "no eligible expiration"
+"""How a symbol's error line starts when no expiration fell in the DTE window."""
+
+_DTE_KEYS = "risk_limits.min_dte, brain.snapshot.max_dte"
 
 _FETCH_ERRORS = (DataError, ConfigError)
 
@@ -141,6 +164,101 @@ def _vendor_greeks(snapshot: OptionSnapshot) -> Greeks | None:
         return None
     delta, gamma, theta, vega, rho = values
     return Greeks(delta=delta, gamma=gamma, theta=theta, vega=vega, rho=rho)
+
+
+# --- which expiration ---------------------------------------------------------
+
+
+def whole_days_to_expiry(
+    expiration: date,
+    now: datetime,
+    *,
+    expiry_time: str = DEFAULT_EXPIRY_TIME,
+    expiry_timezone: str = DEFAULT_EXPIRY_TIMEZONE,
+) -> int:
+    """DTE as the snapshot counts it: the pricing engine's
+    ``calendar_days_to_expiry`` (fractional calendar days to the exchange
+    close on expiration day, 0 once it has passed) rounded down to whole days.
+
+    With the expiry instant at the 16:00 close, this is the policy engine's
+    DTE (calendar days from the trading date to expiration) through the
+    session, and one less after the close — or in the last hour before it,
+    across a daylight-saving change. For a contract that has not expired it
+    is never more, so a floor this count clears is one ``options_min_dte``
+    clears too (``in_dte_window`` admits no expired contract)."""
+    return math.floor(
+        calendar_days_to_expiry(
+            expiration, _utc(now), expiry_time=expiry_time, expiry_timezone=expiry_timezone
+        )
+    )
+
+
+def in_dte_window(
+    expiration: date,
+    *,
+    now: datetime,
+    min_dte: int,
+    max_dte: int,
+    expiry_time: str = DEFAULT_EXPIRY_TIME,
+    expiry_timezone: str = DEFAULT_EXPIRY_TIMEZONE,
+) -> bool:
+    """Whether ``expiration`` is ``min_dte`` to ``max_dte`` days out, both
+    ends included (``whole_days_to_expiry``). An expiration whose close has
+    passed is never in the window, whatever the floor: its DTE reads 0 here
+    (the count is clamped), but the contract is gone."""
+    remaining = calendar_days_to_expiry(
+        expiration, _utc(now), expiry_time=expiry_time, expiry_timezone=expiry_timezone
+    )
+    if remaining <= 0:
+        return False
+    return min_dte <= math.floor(remaining) <= max_dte
+
+
+def eligible_expiration(
+    expirations: Iterable[date],
+    *,
+    now: datetime,
+    min_dte: int,
+    max_dte: int,
+    expiry_time: str = DEFAULT_EXPIRY_TIME,
+    expiry_timezone: str = DEFAULT_EXPIRY_TIMEZONE,
+) -> date | None:
+    """The nearest of ``expirations`` inside the DTE window, or None when
+    none is — never a nearer one outside it."""
+    for expiration in sorted(set(expirations)):
+        if in_dte_window(
+            expiration,
+            now=now,
+            min_dte=min_dte,
+            max_dte=max_dte,
+            expiry_time=expiry_time,
+            expiry_timezone=expiry_timezone,
+        ):
+            return expiration
+    return None
+
+
+def _dte_window(config: AegisConfig, now: datetime) -> Callable[[date], bool]:
+    """The window as the data layer's ``eligible`` test: the floor straight
+    from ``risk_limits.min_dte``, the cap from ``brain.snapshot.max_dte``."""
+    pricing = config.pricing
+
+    def eligible(expiration: date) -> bool:
+        return in_dte_window(
+            expiration,
+            now=now,
+            min_dte=config.risk_limits.min_dte,
+            max_dte=config.brain.snapshot.max_dte,
+            expiry_time=pricing.expiry_time,
+            expiry_timezone=pricing.expiry_timezone,
+        )
+
+    return eligible
+
+
+def _no_eligible_expiration(config: AegisConfig, why: str) -> str:
+    window = f"{config.risk_limits.min_dte}-{config.brain.snapshot.max_dte} DTE"
+    return f"{NO_ELIGIBLE_EXPIRATION} ({window}, {_DTE_KEYS}): {why}; option chain omitted"
 
 
 # --- pure assembly helpers ----------------------------------------------------
@@ -384,7 +502,10 @@ def _symbol_warnings(snapshot: SymbolSnapshot, *, market_open: bool | None) -> l
             f"{_age_label_seconds(snapshot.spot_age_seconds)})"
         )
     if snapshot.chain is None:
-        lines.append(f"{snapshot.symbol}: option chain missing")
+        # A symbol with no expiration in the DTE window already says why
+        # above; "missing" would read as a failed fetch.
+        if not any(error.startswith(NO_ELIGIBLE_EXPIRATION) for error in snapshot.errors):
+            lines.append(f"{snapshot.symbol}: option chain missing")
     elif snapshot.chain.stale and market_open is True:
         lines.append(
             f"{snapshot.symbol}: option chain is STALE ("
@@ -470,10 +591,45 @@ def _fetch_symbol(
         bars = get_bars(symbol)
     except _FETCH_ERRORS as exc:
         errors.append(str(exc))
+    eligible = _dte_window(config, now)
     try:
-        chain = get_option_chain(symbol)
+        chain = get_option_chain(symbol, eligible=eligible)
+    except NoEligibleExpiration as exc:
+        listed = len(exc.listed)
+        errors.append(
+            _no_eligible_expiration(
+                config, f"none of the {listed} listed expiration(s) is in the window"
+            )
+        )
     except _FETCH_ERRORS as exc:
         errors.append(str(exc))
+    if chain is not None and not eligible(chain.expiration):
+        # Whatever answered, a chain outside the window is not used: no
+        # nearer (or later) expiration stands in for an eligible one.
+        days = whole_days_to_expiry(
+            chain.expiration,
+            now,
+            expiry_time=pricing.expiry_time,
+            expiry_timezone=pricing.expiry_timezone,
+        )
+        errors.append(
+            _no_eligible_expiration(
+                config,
+                f"the chain fetched expires {chain.expiration.isoformat()}, at {days} DTE",
+            )
+        )
+        chain = None
+    if chain is not None:
+        # Only that expiration's contracts go on: a contract the vendor
+        # listed under another date (or none) never reaches the thesis stage.
+        kept = [c for c in chain.contracts if c.expiration == chain.expiration]
+        if len(kept) < len(chain.contracts):
+            dropped = len(chain.contracts) - len(kept)
+            errors.append(
+                f"{dropped} contract(s) in the {chain.expiration.isoformat()} chain expire "
+                "on another date or none: left out"
+            )
+            chain = chain.model_copy(update={"contracts": kept})
     if chain is not None:
         # The chain fetch tolerates a missing underlying quote (chain.spot
         # None); our own spot quote is the fallback for the model IV/Greeks.
@@ -523,9 +679,11 @@ def build_market_snapshot(
     assemble the scan stage's input.
 
     Tunables come from ``config`` (default ``get_config()``): the pricing
-    block drives enrichment, ``brain.snapshot`` the ATM window, headline
-    count and staleness threshold. ``now`` fixes the clock for ages and
-    time-to-expiry (default: the current UTC time). Raises ``BrainError``
+    block drives enrichment and the DTE count, ``risk_limits.min_dte`` and
+    ``brain.snapshot.max_dte`` the expiration window, ``brain.snapshot`` the
+    ATM window, headline count and staleness threshold. ``now`` fixes the
+    clock for ages, time-to-expiry and the window (default: the current UTC
+    time). Raises ``BrainError``
     only when there is nothing to snapshot (an empty symbol list); every
     fetch failure is recorded in the result instead.
     """

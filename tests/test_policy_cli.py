@@ -405,16 +405,18 @@ class TestEvaluate:
             f"decision {decision.id} recorded",
             "",
         ]
-        assert lines[11] == "rules (20)"
-        # all twenty, in registry order, exactly as recorded
+        assert lines[11] == "rules (21)"
+        # all twenty-one, in registry order, exactly as recorded
         assert rule_lines(captured.out) == [
             (index, rule["rule"], rule["outcome"], rule["detail"])
             for index, rule in enumerate(decision.rules_evaluated, start=1)
         ]
         assert [name for _, name, _, _ in rule_lines(captured.out)] == list(RULE_NAMES)
         assert lines[12].startswith("  [ 1] kill_switch ")
-        assert lines[31].startswith("  [20] auto_tier ")
-        assert lines[32] == "" and lines[33:] == CONTEXT_BLOCK
+        assert lines[24].startswith("  [13] quote_freshness ")
+        assert lines[25].startswith("  [14] limit_price_sanity ")
+        assert lines[32].startswith("  [21] auto_tier ")
+        assert lines[33] == "" and lines[34:] == CONTEXT_BLOCK
         assert "failing rule" not in captured.out and "HALTED" not in captured.out
         assert "DRY RUN" not in captured.out
         assert events_of(store) == []  # AUTO_EXECUTE logs no event: the decision is its record
@@ -430,7 +432,7 @@ class TestEvaluate:
         out = capsys.readouterr().out
         assert out.splitlines()[0] == "proposal prop-0002"
         assert "verdict: NEEDS_APPROVAL" in out.splitlines()
-        assert len(rule_lines(out)) == 20
+        assert len(rule_lines(out)) == 21
         (decision,) = decisions_of(db_path, "prop-0002")
         assert f"decision {decision.id} recorded" in out.splitlines()
         assert decisions_of(db_path, "prop-0001") == ()
@@ -681,7 +683,7 @@ class TestEvaluate:
         assert cli_trace.main(["prop-0001", "--db", str(store)]) == 0
         out = capsys.readouterr().out
         assert "decisions (1)" in out and "failing rule: max_daily_trades" in out
-        assert "rules evaluated (20)" in out
+        assert "rules evaluated (21)" in out
 
     def test_unknown_id_is_one_clean_line(self, store, capsys):
         before = every_row(store)
@@ -1325,7 +1327,7 @@ class TestEvaluate:
 
     def test_a_random_sweep_always_ends_in_a_printed_verdict(self, db_path, capsys):
         """Hostile contexts (unknown, NaN and infinite figures, broken structures)
-        never break the report: every case prints the engine's verdict and twenty rules."""
+        never break the report: every case prints the engine's verdict and twenty-one rules."""
         rng = random.Random(20260930)
         cases = [random_case(rng, index) for index in range(200)]
         seed(db_path, *(proposal for proposal, _ in cases))
@@ -2273,8 +2275,8 @@ class TestOutputIsClean:
         assert lines[6] == "    [0] buy 1 call 640.0 exp 2026-08-21  SPY ]0;PWNED"
         assert [line for line in lines if line.startswith("verdict:")] == ["verdict: REJECT"]
         printed = rule_lines(out)
-        assert [name for _, name, _, _ in printed] == list(RULE_NAMES)  # twenty, none forged
-        assert sum(line.startswith("  [") for line in lines) == 20
+        assert [name for _, name, _, _ in printed] == list(RULE_NAMES)  # twenty-one, none forged
+        assert sum(line.startswith("  [") for line in lines) == 21
         (decision,) = decisions_of(db_path, EVIL_ID)
         # the details as recorded carry the raw symbol; the printed ones do not
         assert any(ESC in rule["detail"] for rule in decision.rules_evaluated)

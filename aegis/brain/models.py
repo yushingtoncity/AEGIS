@@ -86,7 +86,8 @@ class ContractSummary(Frozen):
 
 
 class ChainSummary(Frozen):
-    """The nearest-expiry chain, ATM ± N strikes, calls and puts."""
+    """The chain of the nearest expiration in the DTE window (``risk_limits.min_dte``
+    to ``brain.snapshot.max_dte``), ATM ± N strikes, calls and puts."""
 
     underlying: str
     expiration: date

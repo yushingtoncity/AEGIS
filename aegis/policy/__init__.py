@@ -3,7 +3,7 @@
 The LLM proposes; this package disposes. Everything here is pure,
 deterministic Python — no model calls, ever: the same proposal and the same
 ``PolicyContext`` always produce the same verdict. ``engine.evaluate`` runs
-all twenty rules in ``rules`` on every proposal (never short-circuiting, so
+all twenty-one rules in ``rules`` on every proposal (never short-circuiting, so
 the audit trail shows each one), resolves exactly one verdict by precedence
 — REJECT, then FLAG_ONLY, then NEEDS_APPROVAL, else AUTO_EXECUTE — and
 records it through the store. AUTO_EXECUTE is unreachable unless every rule

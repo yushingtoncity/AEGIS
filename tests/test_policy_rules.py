@@ -1,4 +1,4 @@
-"""The twenty policy rules and the measures behind them — contexts built by hand, no network.
+"""The twenty-one policy rules and the measures behind them — contexts built by hand, no network.
 
 Each rule is called directly (the engine is tested in
 ``test_policy_engine.py``): its PASS and non-PASS cases, both sides of every
@@ -12,7 +12,7 @@ factories every later policy test builds on.
 import ast
 import random
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -126,9 +126,9 @@ UNKNOWN = pytest.mark.parametrize(
 EXPECTED_NAMES = (
     "kill_switch", "halted", "market_hours", "daily_loss_limit", "no_trade_list",
     "watchlist_only", "invalidation_present", "buying_power", "max_position_pct",
-    "max_open_positions", "max_daily_trades", "duplicate", "limit_price_sanity",
-    "options_min_dte", "options_max_loss", "options_max_contracts", "options_escalate",
-    "short_sale", "min_confidence", "auto_tier",
+    "max_open_positions", "max_daily_trades", "duplicate", "quote_freshness",
+    "limit_price_sanity", "options_min_dte", "options_max_loss", "options_max_contracts",
+    "options_escalate", "short_sale", "min_confidence", "auto_tier",
 )
 ACCOUNT_RULE_NAMES = (
     "kill_switch", "halted", "market_hours", "daily_loss_limit", "max_daily_trades",
@@ -316,10 +316,10 @@ def flattering(proposal: ProposalUnderReview) -> PolicyContext:
 
 
 class TestFactories:
-    def test_the_default_pair_passes_all_twenty_rules(self):
+    def test_the_default_pair_passes_all_twenty_one_rules(self):
         found = results()
         assert tuple(found) == RULE_NAMES
-        assert len(found) == 20
+        assert len(found) == 21
         assert {r.outcome for r in found.values()} == {PASS}
         assert passing() is True
         assert non_pass() == {}
@@ -579,7 +579,7 @@ class TestRandomGenerators:
         ]
         assert len(dust) >= 10
         assert {proposal.proposal.quantity for proposal, _ in dust} == set(DUST_QUANTITIES)
-        # Most of them with no long to close — and then never all twenty PASS.
+        # Most of them with no long to close — and then never all twenty-one PASS.
         unbacked = [
             (proposal, context)
             for proposal, context in dust
@@ -717,9 +717,9 @@ class TestRandomGenerators:
 
 
 class TestRegistry:
-    def test_twenty_rules_in_the_specified_order(self):
+    def test_twenty_one_rules_in_the_specified_order(self):
         assert RULE_NAMES == EXPECTED_NAMES
-        assert len(RULES) == len(set(RULES)) == 20
+        assert len(RULES) == len(set(RULES)) == 21
         assert tuple(rule.__name__ for rule in RULES) == RULE_NAMES
         for rule in RULES:
             assert getattr(rules, rule.__name__) is rule
@@ -845,7 +845,7 @@ class TestAccountRules:
     )
     def test_every_stop_stops_a_closing_sale(self, stop, rule):
         closing = sell(2)
-        assert passing(closing, holding(10))  # but for the stop, all twenty PASS
+        assert passing(closing, holding(10))  # but for the stop, all twenty-one PASS
         context = holding(10, **stop)
         found = results(closing, context)
         assert found[rule].outcome is REJECT
@@ -3129,7 +3129,7 @@ class TestMaxDailyTrades:
         assert self.after(0, limits=make_limits(max_daily_trades=0)).outcome is REJECT
 
 
-# --- rules 12–13: order hygiene -----------------------------------------------
+# --- rules 12–14: order hygiene -----------------------------------------------
 
 
 class TestDuplicate:
@@ -3341,6 +3341,335 @@ class TestDuplicate:
     def test_an_unrepresentable_window_is_simply_very_long(self):
         forever = {"limits": make_limits(duplicate_window_minutes=10**15)}
         assert self.against(self.earlier(timedelta(days=4000)), **forever).outcome is REJECT
+
+
+EQUITY_AGE_KEY = "(risk_limits.max_quote_age_seconds.equity)"
+OPTION_AGE_KEY = "(risk_limits.max_quote_age_seconds.option)"
+
+
+def aged_quote(seconds, **overrides):
+    """The default AAPL quote, its venue timestamp ``seconds`` before ``NOW``."""
+    return make_quote(at=NOW - timedelta(seconds=seconds), **overrides)
+
+
+def aged_legs(proposal, ages):
+    """``leg_quotes_for(proposal)`` with each leg's venue timestamp ``ages[i]``
+    seconds before ``NOW`` (None: no timestamp)."""
+    return tuple(
+        snapshot.model_copy(
+            update={"quote_time": None if age is None else NOW - timedelta(seconds=age)}
+        )
+        for snapshot, age in zip(leg_quotes_for(proposal), ages)
+    )
+
+
+class TestPricedQuotes:
+    def test_an_equity_depends_on_its_own_quote(self):
+        quote = make_quote()
+        assert measures.priced_quotes(make_proposal(), make_context(quote=quote)) == (
+            (SYMBOL, quote),
+        )
+
+    def test_a_quote_for_another_symbol_or_none_is_missing(self):
+        other = make_context(quote=make_quote("MSFT"))
+        assert measures.priced_quotes(make_proposal(), other) == ((SYMBOL, None),)
+        assert measures.priced_quotes(make_proposal(), make_context(quote=None)) == (
+            (SYMBOL, None),
+        )
+
+    def test_an_option_depends_on_every_leg_once_in_leg_order(self):
+        condor = iron_condor()
+        quotes = leg_quotes_for(condor)
+        found = measures.priced_quotes(condor, context_for(condor))
+        assert found == tuple((leg.symbol, quote) for leg, quote in zip(condor.legs, quotes))
+        wash = option_proposal(
+            [make_leg("buy", "call", 640.0), make_leg("sell", "call", 640.0, index=1)]
+        )
+        assert [symbol for symbol, _ in measures.priced_quotes(wash, context_for(wash))] == [
+            CALL_640
+        ]
+
+    def test_a_leg_without_a_quote_and_an_option_without_legs(self):
+        spread = call_debit_spread()
+        only_first = context_for(spread, leg_quotes=leg_quotes_for(spread)[:1])
+        found = measures.priced_quotes(spread, only_first)
+        assert [quote is None for _, quote in found] == [False, True]
+        assert measures.priced_quotes(option_proposal([]), make_context()) == ()
+
+    def test_an_equity_never_reads_the_leg_quotes(self):
+        spread = call_debit_spread()
+        context = make_context(leg_quotes=leg_quotes_for(spread))
+        assert measures.priced_quotes(make_proposal(), context) == ((SYMBOL, make_quote()),)
+
+
+class TestQuoteAge:
+    def test_seconds_from_the_venue_timestamp_to_the_as_of_time(self):
+        assert measures.quote_age(aged_quote(905.5), make_context()) == 905.5
+        assert measures.quote_age(make_snapshot(CALL_640, 8.0, at=NOW), make_context()) == 0.0
+
+    def test_not_from_fetched_at_nor_the_last_trade(self):
+        quote = aged_quote(300).model_copy(update={"fetched_at": NOW, "last_time": NOW})
+        assert measures.quote_age(quote, make_context()) == 300.0
+        fresh = make_quote().model_copy(
+            update={"fetched_at": NOW - timedelta(hours=5), "last_time": NOW - timedelta(hours=5)}
+        )
+        assert measures.quote_age(fresh, make_context()) == 0.0
+
+    def test_no_timestamp_is_no_age(self):
+        assert measures.quote_age(make_quote(at=None), make_context()) is None
+        assert measures.quote_age(make_snapshot(CALL_640, 8.0, at=None), make_context()) is None
+
+    def test_a_quote_stamped_after_the_as_of_time_is_negative(self):
+        assert measures.quote_age(make_quote(at=NOW + timedelta(seconds=3)), make_context()) == -3.0
+
+    def test_a_tzinfo_that_names_no_offset_is_taken_as_utc_never_raises(self):
+        class Unnamed(tzinfo):
+            def utcoffset(self, dt):
+                return None
+
+        odd = make_quote().model_copy(
+            update={"quote_time": datetime(2026, 7, 30, 14, 58, tzinfo=Unnamed())}
+        )
+        assert measures.quote_age(odd, make_context()) == 120.0
+        result = run(rules.quote_freshness, make_proposal(), make_context(quote=odd))
+        assert result.outcome is PASS and "120s old" in result.detail
+
+    def test_a_naive_timestamp_is_utc_and_any_offset_is_converted(self):
+        naive = make_quote().model_copy(update={"quote_time": datetime(2026, 7, 30, 14, 58)})
+        assert measures.quote_age(naive, make_context()) == 120.0
+        new_york = ZoneInfo("America/New_York")
+        local = make_quote().model_copy(
+            update={"quote_time": datetime(2026, 7, 30, 10, 58, tzinfo=new_york)}
+        )
+        assert measures.quote_age(local, make_context()) == 120.0
+
+
+class TestQuoteFreshness:
+    @staticmethod
+    def equity(quote, **overrides):
+        return run(rules.quote_freshness, make_proposal(), make_context(quote=quote, **overrides))
+
+    @staticmethod
+    def option(proposal, ages, **overrides):
+        context = context_for(proposal, leg_quotes=aged_legs(proposal, ages), **overrides)
+        return run(rules.quote_freshness, proposal, context)
+
+    def test_it_runs_immediately_before_limit_price_sanity(self):
+        assert RULE_NAMES.index("quote_freshness") == 12  # rule 13 of 21
+        assert RULE_NAMES[RULE_NAMES.index("quote_freshness") + 1] == "limit_price_sanity"
+
+    def test_a_fresh_equity_quote_passes(self):
+        result = run(rules.quote_freshness)
+        assert result.outcome is PASS
+        assert result.detail == (
+            f"the quote for AAPL is 0s old, within the limit of 120s {EQUITY_AGE_KEY}"
+        )
+
+    def test_one_second_over_the_equity_limit_rejects_and_says_so(self):
+        result = self.equity(aged_quote(121))
+        assert result.outcome is REJECT
+        assert result.detail == (
+            f"the quote for AAPL is 121s old, above the limit of 120s {EQUITY_AGE_KEY}"
+        )
+
+    def test_exactly_at_the_limit_passes(self):
+        result = self.equity(aged_quote(120))
+        assert result.outcome is PASS
+        assert result.detail == (
+            f"the quote for AAPL is 120s old, within the limit of 120s {EQUITY_AGE_KEY}"
+        )
+
+    def test_the_comparison_carries_the_float_noise_guard(self):
+        # A timestamp resolves to the microsecond, so at the shipped limits a
+        # millisecond over is over. The guard is relative (one part in a
+        # billion, as for every limit): under a limit of a billion seconds,
+        # half a second past it is noise and two seconds are not.
+        assert self.equity(aged_quote(120.001)).outcome is REJECT
+        assert self.option(long_call(), [1200.001]).outcome is REJECT
+        vast = make_limits(max_quote_age_seconds={"equity": 1e9, "option": 1e9})
+        assert self.equity(aged_quote(1e9 + 0.5), limits=vast).outcome is PASS
+        assert self.equity(aged_quote(1e9 + 2), limits=vast).outcome is REJECT
+
+    def test_a_quote_with_no_timestamp_rejects(self):
+        result = self.equity(make_quote(at=None))
+        assert result.outcome is REJECT
+        assert result.detail == f"the quote for AAPL has no venue timestamp {EQUITY_AGE_KEY}"
+
+    def test_no_quote_rejects(self):
+        result = self.equity(None)
+        assert result.outcome is REJECT
+        assert result.detail == f"no quote for AAPL {EQUITY_AGE_KEY}"
+
+    def test_a_quote_for_another_symbol_is_no_quote(self):
+        result = self.equity(make_quote("MSFT"))
+        assert result.outcome is REJECT
+        assert result.detail == (
+            f"no quote for AAPL (the quote in hand is for MSFT) {EQUITY_AGE_KEY}"
+        )
+
+    def test_age_is_measured_from_the_venue_timestamp_not_fetched_at(self):
+        fetched_now = aged_quote(600).model_copy(update={"fetched_at": NOW})
+        assert self.equity(fetched_now).outcome is REJECT
+        fetched_long_ago = make_quote().model_copy(update={"fetched_at": NOW - timedelta(days=1)})
+        assert self.equity(fetched_long_ago).outcome is PASS
+
+    def test_the_bid_and_ask_timestamp_counts_not_the_last_trade(self):
+        # The mid the limit is judged against is made of the bid and ask.
+        old_book = aged_quote(600).model_copy(update={"last_time": NOW})
+        assert self.equity(old_book).outcome is REJECT
+        old_trade = make_quote().model_copy(update={"last_time": NOW - timedelta(hours=1)})
+        assert self.equity(old_trade).outcome is PASS
+
+    def test_age_runs_to_the_contexts_as_of_time(self):
+        later = NOW + timedelta(minutes=10)
+        assert self.equity(make_quote(), now=later).outcome is REJECT  # 600 s old by then
+        assert self.equity(make_quote(at=later), now=later).outcome is PASS
+
+    def test_a_quote_dated_after_the_as_of_time_passes_and_says_so(self):
+        # The context's clock is read before its quotes are fetched.
+        result = self.equity(make_quote(at=NOW + timedelta(seconds=2)))
+        assert result.outcome is PASS
+        assert result.detail == (
+            "the quote for AAPL is dated 2s after the as-of time, within the limit of 120s "
+            f"{EQUITY_AGE_KEY}"
+        )
+
+    def test_a_naive_timestamp_is_taken_as_utc(self):
+        naive = make_quote().model_copy(update={"quote_time": datetime(2026, 7, 30, 14, 57, 59)})
+        result = self.equity(naive)
+        assert result.outcome is REJECT and "121s old" in result.detail
+
+    # --- options: every leg ---------------------------------------------------
+
+    def test_fresh_legs_pass_and_the_oldest_is_named(self):
+        condor = iron_condor()
+        result = self.option(condor, [900, 905, 0, 1200])
+        assert result.outcome is PASS
+        assert result.detail == (
+            f"the oldest, for leg {condor.legs[3].symbol}, is 1200s old, within the limit of "
+            f"1200s {OPTION_AGE_KEY}"
+        )
+
+    def test_a_single_leg_is_named_on_its_own(self):
+        call = long_call()
+        result = self.option(call, [905])
+        assert result.outcome is PASS
+        assert result.detail == (
+            f"the quote for leg {CALL_640} is 905s old, within the limit of 1200s {OPTION_AGE_KEY}"
+        )
+
+    def test_one_stale_leg_among_fresh_legs_rejects_and_names_only_that_leg(self):
+        condor = iron_condor()
+        result = self.option(condor, [900, 1201, 30, 1200])
+        assert result.outcome is REJECT
+        stale = condor.legs[1].symbol
+        assert result.detail == (
+            f"the quote for leg {stale} is 1201s old, above the limit of 1200s {OPTION_AGE_KEY}"
+        )
+        for leg in (condor.legs[0], condor.legs[2], condor.legs[3]):
+            assert leg.symbol not in result.detail
+
+    def test_every_offending_leg_is_named(self):
+        spread = call_debit_spread()
+        result = self.option(spread, [5000, None])
+        assert result.outcome is REJECT
+        first, second = (leg.symbol for leg in spread.legs)
+        assert result.detail == (
+            f"the quote for leg {first} is 5000s old, above the limit of 1200s; "
+            f"the quote for leg {second} has no venue timestamp {OPTION_AGE_KEY}"
+        )
+
+    def test_exactly_at_the_option_limit_passes_a_second_over_rejects(self):
+        assert self.option(long_call(), [1200]).outcome is PASS
+        assert self.option(long_call(), [1201]).outcome is REJECT
+
+    def test_a_leg_with_no_timestamp_rejects(self):
+        result = self.option(put_credit_spread(), [0, None])
+        assert result.outcome is REJECT and "has no venue timestamp" in result.detail
+
+    def test_a_leg_with_no_quote_rejects(self):
+        spread = put_credit_spread()
+        context = context_for(spread, leg_quotes=leg_quotes_for(spread)[1:])
+        result = run(rules.quote_freshness, spread, context)
+        assert result.outcome is REJECT
+        assert result.detail == f"no quote for leg {spread.legs[0].symbol} {OPTION_AGE_KEY}"
+
+    def test_an_option_without_legs_rejects(self):
+        result = run(rules.quote_freshness, option_proposal([]))
+        assert result.outcome is REJECT
+        assert result.detail == (
+            f"the option proposal has no legs whose quotes to check {OPTION_AGE_KEY}"
+        )
+
+    def test_a_leg_quoted_twice_is_judged_once(self):
+        wash = option_proposal(
+            [make_leg("buy", "call", 640.0), make_leg("sell", "call", 640.0, index=1)]
+        )
+        stale_quote = make_snapshot(CALL_640, 8.0, at=NOW - timedelta(seconds=1300))
+        result = run(rules.quote_freshness, wash, context_for(wash, leg_quotes=(stale_quote,)))
+        assert result.outcome is REJECT and result.detail.count(CALL_640) == 1
+
+    # --- the limits, per instrument ------------------------------------------
+
+    def test_each_instrument_has_its_own_limit(self):
+        # 900 s: past the equity limit, inside the option one.
+        assert self.equity(aged_quote(900)).outcome is REJECT
+        assert self.option(long_call(), [900]).outcome is PASS
+        # ... and an option leg is never held to the equity limit, nor an
+        # equity quote to the option one.
+        assert self.option(long_call(), [121]).outcome is PASS
+        assert self.equity(aged_quote(1199)).outcome is REJECT
+
+    def test_the_limits_come_from_the_config(self):
+        swapped = make_limits(max_quote_age_seconds={"equity": 1500, "option": 60})
+        result = self.equity(aged_quote(900), limits=swapped)
+        assert result.outcome is PASS and "within the limit of 1500s" in result.detail
+        result = self.option(long_call(), [61], limits=swapped)
+        assert result.outcome is REJECT and "above the limit of 60s" in result.detail
+        assert self.option(long_call(), [60], limits=swapped).outcome is PASS
+
+    def test_a_limit_of_zero_admits_only_a_quote_stamped_at_the_as_of_time(self):
+        zero = make_limits(max_quote_age_seconds={"equity": 0, "option": 0})
+        assert self.equity(make_quote(), limits=zero).outcome is PASS
+        assert self.equity(aged_quote(1), limits=zero).outcome is REJECT
+
+    def test_the_rule_reads_the_declared_instrument(self):
+        # An "equity" named by a contract still needs its own quote; the
+        # option limit never applies to it (its shape is options_max_loss's).
+        mislabelled = make_proposal(symbol=CALL_640)
+        quote = make_quote(CALL_640, at=NOW - timedelta(seconds=600))
+        result = run(rules.quote_freshness, mislabelled, make_context(quote=quote))
+        assert result.outcome is REJECT and EQUITY_AGE_KEY in result.detail
+
+    def test_a_market_order_is_held_to_the_same_limit(self):
+        # Its notional is the worst-case fill at these very quotes.
+        allowed = make_limits(allow_market_orders=True)
+        market = make_proposal(order_type=OrderType.MARKET, limit_price=None)
+        context = make_context(quote=aged_quote(121), limits=allowed)
+        assert run(rules.quote_freshness, market, context).outcome is REJECT
+
+    # --- in the engine's order ------------------------------------------------
+
+    def test_a_stale_quote_is_the_failing_rule_not_the_price(self):
+        # Priced 30% from the mid AND stale: the staleness is named first.
+        proposal = make_proposal(limit_price=260.0)
+        context = make_context(quote=aged_quote(121))
+        assert outcomes(proposal, context)["limit_price_sanity"] is REJECT
+        assert first_reject(proposal, context) == "quote_freshness"
+
+    def test_a_stale_quote_alone_stops_an_order_that_would_auto_execute(self):
+        assert passing()
+        stale = make_context(quote=aged_quote(121))
+        assert non_pass(context=stale) == {"quote_freshness": REJECT}
+        assert first_reject(make_proposal(), stale) == "quote_freshness"
+
+    def test_a_stale_leg_alone_is_the_failing_rule_of_a_sound_spread(self):
+        spread = call_debit_spread()
+        context = context_for(spread, leg_quotes=aged_legs(spread, [0, 1201]))
+        assert first_reject(spread, context) == "quote_freshness"
+        assert non_pass(spread, context) == {
+            "quote_freshness": REJECT, "options_escalate": ESCALATE, "auto_tier": ESCALATE,
+        }
 
 
 def _prices_and_percentage(detail: str) -> tuple[float, float, float]:
@@ -3582,7 +3911,7 @@ class TestLimitPriceSanity:
         assert result.outcome is REJECT and "no legs" in result.detail
 
 
-# --- rules 14–17: options -----------------------------------------------------
+# --- rules 15–18: options -----------------------------------------------------
 
 
 class TestOptionsMinDte:
@@ -3600,7 +3929,10 @@ class TestOptionsMinDte:
         assert result.outcome is PASS and "22 DTE" in result.detail
 
     def test_boundary_at_the_minimum_passes_one_day_less_rejects(self):
-        assert self.expiring(1).outcome is PASS
+        # the default floor is 7 (risk_limits.min_dte)
+        assert self.expiring(7).outcome is PASS
+        six_dte = self.expiring(6)
+        assert six_dte.outcome is REJECT and "at 6 DTE" in six_dte.detail
         zero_dte = self.expiring(0)
         assert zero_dte.outcome is REJECT and "at 0 DTE" in zero_dte.detail
         assert self.expiring(-1).outcome is REJECT  # already expired
@@ -3608,14 +3940,16 @@ class TestOptionsMinDte:
     @pytest.mark.parametrize("build", STRUCTURES)
     def test_the_boundary_holds_for_every_structure_bought_or_sold(self, build):
         # A 0DTE credit spread or condor is as close to expiry as a 0DTE long call.
-        tomorrow = build(expiration=MARKET_DATE + timedelta(days=1))
-        assert run(rules.options_min_dte, tomorrow, context_for(tomorrow)).outcome is PASS
+        week = build(expiration=MARKET_DATE + timedelta(days=7))
+        assert run(rules.options_min_dte, week, context_for(week)).outcome is PASS
+        six = build(expiration=MARKET_DATE + timedelta(days=6))
+        assert run(rules.options_min_dte, six, context_for(six)).outcome is REJECT
         today = build(expiration=MARKET_DATE)
         result = run(rules.options_min_dte, today, context_for(today))
         assert result.outcome is REJECT
         for leg in today.legs:
             assert f"{leg.symbol} at 0 DTE" in result.detail
-        assert "below the minimum of 1 (risk_limits.min_dte)" in result.detail
+        assert "below the minimum of 7 (risk_limits.min_dte)" in result.detail
         expired = build(expiration=MARKET_DATE - timedelta(days=1))
         assert run(rules.options_min_dte, expired, context_for(expired)).outcome is REJECT
 
@@ -3625,9 +3959,12 @@ class TestOptionsMinDte:
         assert first_reject(today, context_for(today)) == "options_min_dte"
 
     def test_the_minimum_comes_from_the_limits(self):
-        week = {"limits": make_limits(min_dte=7)}
-        assert self.expiring(7, **week).outcome is PASS
-        assert self.expiring(6, **week).outcome is REJECT
+        fortnight = {"limits": make_limits(min_dte=14)}
+        assert self.expiring(14, **fortnight).outcome is PASS
+        assert self.expiring(13, **fortnight).outcome is REJECT
+        one = {"limits": make_limits(min_dte=1)}  # the Phase 5 floor: 0DTE out, and nothing else
+        assert self.expiring(1, **one).outcome is PASS
+        assert self.expiring(0, **one).outcome is REJECT
 
     def test_a_minimum_of_zero_allows_same_day_but_never_expired(self):
         zero = {"limits": make_limits(min_dte=0)}
@@ -3638,8 +3975,10 @@ class TestOptionsMinDte:
         proposal = long_call()
         on_the_day = make_context(market_date=EXPIRY)
         assert run(rules.options_min_dte, proposal, on_the_day).outcome is REJECT
-        day_before = make_context(market_date=EXPIRY - timedelta(days=1))
-        assert run(rules.options_min_dte, proposal, day_before).outcome is PASS
+        week_before = make_context(market_date=EXPIRY - timedelta(days=7))
+        assert run(rules.options_min_dte, proposal, week_before).outcome is PASS
+        six_days_before = make_context(market_date=EXPIRY - timedelta(days=6))
+        assert run(rules.options_min_dte, proposal, six_days_before).outcome is REJECT
 
     def test_any_one_leg_too_close_rejects_and_only_it_is_listed(self):
         near = make_leg("sell", "call", 650.0, index=1, expiration=MARKET_DATE)
@@ -3895,7 +4234,7 @@ class TestOptionsEscalate:
             assert run(rules.options_escalate, proposal).outcome is ESCALATE
 
 
-# --- rules 18–20: tiers -------------------------------------------------------
+# --- rules 19–21: tiers -------------------------------------------------------
 
 
 class TestShortSale:
@@ -3963,7 +4302,7 @@ class TestShortSale:
         assert result.outcome is ESCALATE
         assert "is a short sale: no long AAPL position is held" in result.detail
         assert "closes an existing long" not in result.detail
-        # Never all twenty PASS: a human must look, and with the flag it is rejected.
+        # Never all twenty-one PASS: a human must look, and with the flag it is rejected.
         assert non_pass(proposal, context) == {"short_sale": ESCALATE, "auto_tier": ESCALATE}
         assert not passing(proposal, context)
         rejecting = context_for(proposal, positions=positions, limits=self.REJECTING)
@@ -4354,7 +4693,7 @@ class TestAutoTier:
     def test_an_equity_buy_auto_executes_with_cash_and_options_buying_power_unknown(
         self, unknown
     ):
-        # No rule reads cash or options buying power for shares: all twenty
+        # No rule reads cash or options buying power for shares: all twenty-one
         # PASS — what the engine turns into AUTO_EXECUTE. A recorded decision
         # (R9), not an oversight.
         context = make_context(cash=unknown, options_buying_power=unknown)
@@ -4426,7 +4765,7 @@ class TestUnknownIsNeverGoodNews:
         rejected = {name for name, outcome in found.items() if outcome is REJECT}
         assert rejected == {
             "kill_switch", "halted", "market_hours", "daily_loss_limit", "buying_power",
-            "max_position_pct", "max_open_positions", "limit_price_sanity",
+            "max_position_pct", "max_open_positions", "quote_freshness", "limit_price_sanity",
         }
         assert not passing(context=blind)
 

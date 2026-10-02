@@ -1063,10 +1063,15 @@ class TestMarketDate:
 
     def test_dte_is_counted_from_the_market_date(self, conn, feeds):
         proposal = stored(conn, spy_vertical())
-        # 03:00 UTC on expiration day is still the evening before in New York.
-        evening_before = build(conn, proposal, now=datetime(2026, 8, 21, 3, 0, tzinfo=UTC))
-        assert evening_before.market_date == date(2026, 8, 20)
+        assert CONFIG.risk_limits.min_dte == 7
+        # 03:00 UTC on the 15th is still the evening of the 14th in New York:
+        # 7 DTE, at the floor. By 15:00 UTC the same day it is 6 DTE.
+        evening_before = build(conn, proposal, now=datetime(2026, 8, 15, 3, 0, tzinfo=UTC))
+        assert evening_before.market_date == date(2026, 8, 14)
         assert results(proposal, evening_before)["options_min_dte"].outcome is PASS
+        next_day = build(conn, proposal, now=datetime(2026, 8, 15, 15, 0, tzinfo=UTC))
+        assert next_day.market_date == date(2026, 8, 15)
+        assert results(proposal, next_day)["options_min_dte"].outcome is REJECT  # 6 DTE
         expiration_day = build(conn, proposal, now=datetime(2026, 8, 21, 15, 0, tzinfo=UTC))
         assert expiration_day.market_date == EXPIRY
         assert results(proposal, expiration_day)["options_min_dte"].outcome is REJECT  # 0DTE
@@ -1229,6 +1234,7 @@ class TestNextOpenDate:
             }
         )
         feeds.account = account.model_copy(update={"positions": []})  # up 748.90 on the day
+        feeds.quotes["AAPL"] = make_quote(at=at_0931)  # a quote as fresh as the morning
         recovered = build(conn, second, now=at_0931)
         assert recovered.daily_pnl > 0 and recovered.clock.is_open
         assert recovered.controls.halt_until == self.CLOSE_31
@@ -2046,7 +2052,7 @@ class TestFailingFetchers:
         assert context.errors == (
             "quote for SPY: failed to fetch spot quote for SPY (ConnectionError: down)",
         )
-        assert rejecting(proposal, context) == {"limit_price_sanity"}
+        assert rejecting(proposal, context) == {"quote_freshness", "limit_price_sanity"}
 
     def test_the_option_chain(self, conn, feeds):
         proposal = stored(conn, spy_vertical())
@@ -2060,7 +2066,7 @@ class TestFailingFetchers:
         assert feeds.called("chain") == [("chain", "SPY", EXPIRY)]  # asked once, not per leg
         # A limit order still has its price, so the structure is still analysed.
         assert context.analysis.max_loss == pytest.approx(510.0)
-        assert rejecting(proposal, context) == {"limit_price_sanity"}
+        assert rejecting(proposal, context) == {"quote_freshness", "limit_price_sanity"}
 
     def test_a_market_order_without_quotes_has_no_price_and_no_analysis(self, conn, feeds):
         proposal = stored(conn, spy_vertical(order_type=OrderType.MARKET, limit_price=None))
@@ -2178,7 +2184,7 @@ class TestFailingFetchers:
         assert context.limits is CONFIG.risk_limits and context.market_date == date(2026, 7, 30)
         assert rejecting(proposal, context) == {
             "market_hours", "daily_loss_limit", "buying_power", "max_position_pct",
-            "max_open_positions", "limit_price_sanity",
+            "max_open_positions", "quote_freshness", "limit_price_sanity",
         }
 
     def test_everything_failing_for_an_option_still_builds(self, conn, feeds):
@@ -2189,9 +2195,10 @@ class TestFailingFetchers:
         context = build(conn, proposal)
         assert context.leg_quotes == ()
         assert len(context.errors) == 3
-        assert {"market_hours", "daily_loss_limit", "buying_power", "limit_price_sanity"} <= (
-            rejecting(proposal, context)
-        )
+        assert {
+            "market_hours", "daily_loss_limit", "buying_power", "quote_freshness",
+            "limit_price_sanity",
+        } <= rejecting(proposal, context)
 
     @pytest.mark.parametrize("failing", ["clock", "account", "quote", "chain"])
     def test_then_the_engine_rejects(self, conn, feeds, failing):
@@ -2210,8 +2217,9 @@ class TestFailingFetchers:
         expected = {
             "clock": "market_hours",
             "account": "daily_loss_limit",
-            "quote": "limit_price_sanity",
-            "chain": "limit_price_sanity",
+            # a missing quote has no age either: the staleness rule names it first
+            "quote": "quote_freshness",
+            "chain": "quote_freshness",
         }
         assert evaluation.failing_rule == expected[failing]
 
@@ -2324,7 +2332,7 @@ def random_feeds(rng, proposal, account, open_clock, closed_clock) -> Feeds:
 
 class TestNeverRaises:
     """Whatever the feeds do and whatever the proposal says, the build ends in
-    a context and the twenty rules end in twenty results."""
+    a context and the twenty-one rules end in twenty-one results."""
 
     def test_seeded_hostile_feeds_and_proposals(
         self, conn, monkeypatch, account, open_clock, fixture
