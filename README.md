@@ -1,10 +1,11 @@
 # AEGIS
 
-An agentic trading platform. Phase 0–5 status: project skeleton, the data
+An agentic trading platform. Phase 0–5.1 status: project skeleton, the data
 layer (Alpaca paper account, stocks, options, news), a pure-math pricing
 engine, a SQLite audit log with operator CLIs, the agent brain that proposes
 trades into that log, and the deterministic policy engine that gives every
-proposal a verdict. Nothing trades yet — by design: there is no Executor
+proposal a verdict. Phase 5.1 keeps the brain's option chains at or past the
+policy's DTE floor and adds a quote-age rule to the engine. Nothing trades yet — by design: there is no Executor
 implementation until Phase 6, so a verdict is all that happens to a proposal.
 
 ## Architecture principles
@@ -223,7 +224,7 @@ own model from `brain.stages` in `config.yaml`:
 
 | Stage | Default model | Input | Output |
 | ----- | ------------- | ----- | ------ |
-| **scan** | `claude-haiku-4-5-20251001` | the watchlist snapshot: spot, nearest-expiry chain (ATM ± 5) with IV and Greeks from the vendor or our pricing engine, headlines, account and positions, data-age flags | `ScanBrief`: per-symbol summary, IV/skew observations, catalysts, staleness warnings |
+| **scan** | `claude-haiku-4-5-20251001` | the watchlist snapshot: spot, the chain of the nearest expiration 7–45 DTE (ATM ± 5; see "Which expiration") with IV and Greeks from the vendor or our pricing engine, headlines, account and positions, data-age flags | `ScanBrief`: per-symbol summary, IV/skew observations, catalysts, staleness warnings |
 | **thesis** | `claude-opus-5-5` | the brief, positions, a read-only summary of `risk_limits`, recent proposals from the store (so it does not repeat itself), the contracts actually available | `ThesisOutput`: zero or more `ThesisCandidate`s (symbol, direction, instrument/structure, rationale, confidence, key risk, invalidation). Empty with a reason is a respectable answer |
 | **proposal** | `claude-fable-5-1` | the best candidate resolved to concrete contracts with live quotes, the pricing engine's max loss / max profit / breakevens / net Greeks for the structure, account state | `ProposalOutput`: a `TradeProposal` (symbol, instrument, side, quantity, order type, limit price, thesis, confidence, invalidation, legs) **or** `no_trade` with a reason |
 
@@ -239,6 +240,38 @@ it), a `no_trade` event, a `budget_halt`, or a logged failure — always
 followed by `cycle_end`. When the market is closed the cycle still runs, and
 the brief carries the deterministic staleness warnings whether or not the
 model repeats them.
+
+### Which expiration
+
+Each symbol's chain comes from the **nearest listed expiration whose DTE is
+at least `risk_limits.min_dte` and at most `brain.snapshot.max_dte`** (7 and
+45 as shipped). The floor is read from `risk_limits.min_dte` itself, not
+copied into the brain's block, so the brain and the policy engine's
+`options_min_dte` share one number and cannot drift apart.
+
+- **DTE** here is the pricing engine's calendar-day convention
+  (`calendar_days_to_expiry`: fractional calendar days to the exchange close
+  on expiration day) in whole days, rounded down. Through the session that
+  matches the policy's DTE (calendar days from the trading date); after the
+  close it is one less; it is never more. So a chain the brain picks is never
+  one `options_min_dte` rejects. An expiration whose close has passed is
+  never eligible, whatever the floor.
+- The data layer does the fetching: `get_option_chain(symbol,
+  eligible=...)` reads the expiration listing and fetches only the nearest
+  date the brain's test accepts. The snapshot then checks the chain it got
+  back and refuses one outside the window.
+- **No eligible expiration** (nothing listed between the floor and the cap)
+  is a data warning, not an error: the symbol gets a `no eligible expiration
+  (7-45 DTE, risk_limits.min_dte, brain.snapshot.max_dte): …; option chain
+  omitted` line, no chain, and the cycle goes on. A nearer expiration is never
+  used in its place.
+- The thesis stage is shown only that chain and may only name its
+  expiration and strikes (`validate_candidates`), so every option candidate
+  comes from the eligible expiration. A symbol with no chain is offered for
+  equity candidates only.
+
+The operator snapshot CLI (`python -m aegis.cli.snapshot`) still shows the
+nearest expiration, or the one `--expiration` names.
 
 ### Prompts and the injection guard
 
@@ -305,7 +338,7 @@ the "deterministic code disposes" half of the governing principle. It is
 pure Python with **no model calls, ever**: the same proposal and the same
 context always produce the same verdict. Every proposal gets exactly one of
 four verdicts — `REJECT`, `FLAG_ONLY`, `NEEDS_APPROVAL` or `AUTO_EXECUTE` —
-and `AUTO_EXECUTE` is unreachable unless every one of the twenty rules
+and `AUTO_EXECUTE` is unreachable unless every one of the twenty-one rules
 passed. A verdict is all this phase produces: there is no Executor
 implementation yet, so even `AUTO_EXECUTE` places no order until Phase 6.
 
@@ -324,7 +357,8 @@ same test pins the engine's purity: nothing under `aegis/policy` imports
 `context.py` may read the clock or fetch data.
 
 The spec the phase was built against, and the decisions and review rulings
-taken along the way, are kept in `docs/phase5/`.
+taken along the way, are kept in `docs/phase5/`; the Phase 5.1 follow-ups
+(the expiry floor and `quote_freshness`) are in `docs/phase5_1/NOTES.md`.
 
 ### Inputs: the proposal and the context
 
@@ -354,12 +388,12 @@ needs an unknown value rejects. A failed fetch never aborts the build — the
 proposal still reaches the engine and is rejected there, on the record. A
 rule that raises is itself a REJECT, and the engine still runs the rest.
 
-### The twenty rules
+### The twenty-one rules
 
 Every rule is a pure function of `(proposal, context)` returning a name, an
 outcome (`PASS`, `FLAG`, `ESCALATE` or `REJECT`) and a human-readable detail
 with the numbers it compared. Every number comes from `risk_limits` in
-`config.yaml`; nothing in `aegis/policy` hardcodes one. All twenty always
+`config.yaml`; nothing in `aegis/policy` hardcodes one. All twenty-one always
 run, in this order — the engine never short-circuits — so the audit trail
 shows what each one found.
 
@@ -377,14 +411,15 @@ shows what each one found.
 | 10 | `max_open_positions` | a new underlying while distinct underlyings held or pending ≥ `max_open_positions` | REJECT |
 | 11 | `max_daily_trades` | orders sent today ≥ `max_daily_trades` | REJECT |
 | 12 | `duplicate` | an earlier proposal with the same symbol, instrument and side within `duplicate_window_minutes`, or an open order on one of the proposal's symbols | REJECT |
-| 13 | `limit_price_sanity` | a market order while `allow_market_orders` is false; a limit more than `limit_price_tolerance_pct` from the current mid; no usable limit or no mid to check it against | REJECT |
-| 14 | `options_min_dte` | any leg with fewer than `min_dte` days to expiration | REJECT |
-| 15 | `options_max_loss` | max loss > `max_loss_per_trade`; **unlimited risk, unconditionally**; a structure that cannot be analysed or whose shape is not what its instrument says (see Shape) | REJECT |
-| 16 | `options_max_contracts` | any leg quantity > `max_contracts` | REJECT |
-| 17 | `options_escalate` | the instrument is an option — always (and anything option-like under an equity label) | ESCALATE |
-| 18 | `short_sale` | an equity sell that does not close an existing long | ESCALATE (REJECT if `reject_short_sales`) |
-| 19 | `min_confidence` | confidence < `min_confidence` | FLAG |
-| 20 | `auto_tier` | anything but: `auto_execute.enabled`, a plain equity, a buy or a sell closing a long, a limit order, a watchlist symbol, a known notional ≤ `auto_execute.max_notional` | ESCALATE |
+| 13 | `quote_freshness` | a quote the price check depends on (the equity's own, or any option leg's) is older than `max_quote_age_seconds` for its instrument, has no venue timestamp, or is not there | REJECT |
+| 14 | `limit_price_sanity` | a market order while `allow_market_orders` is false; a limit more than `limit_price_tolerance_pct` from the current mid; no usable limit or no mid to check it against | REJECT |
+| 15 | `options_min_dte` | any leg with fewer than `min_dte` days to expiration | REJECT |
+| 16 | `options_max_loss` | max loss > `max_loss_per_trade`; **unlimited risk, unconditionally**; a structure that cannot be analysed or whose shape is not what its instrument says (see Shape) | REJECT |
+| 17 | `options_max_contracts` | any leg quantity > `max_contracts` | REJECT |
+| 18 | `options_escalate` | the instrument is an option — always (and anything option-like under an equity label) | ESCALATE |
+| 19 | `short_sale` | an equity sell that does not close an existing long | ESCALATE (REJECT if `reject_short_sales`) |
+| 20 | `min_confidence` | confidence < `min_confidence` | FLAG |
+| 21 | `auto_tier` | anything but: `auto_execute.enabled`, a plain equity, a buy or a sell closing a long, a limit order, a watchlist symbol, a known notional ≤ `auto_execute.max_notional` | ESCALATE |
 
 Definitions the rules share (`aegis/policy/measures.py`):
 
@@ -403,6 +438,13 @@ Definitions the rules share (`aegis/policy/measures.py`):
   the trade cap stop a closing sale like anything else.
 - **DTE** counts calendar days from the trading date (the date in the
   exchange's timezone) to expiration: 0 expires today.
+- **Quote age** runs from a quote's venue timestamp (`quote_time`: the time
+  of the bid and ask a mid is made of, not the last trade) to the context's
+  as-of time (`now`), never from `fetched_at`. `quote_freshness` sits
+  immediately before `limit_price_sanity`, so a limit judged against a stale
+  mid is rejected for the staleness, which `failing_rule` names. It checks
+  the quotes whatever the order type: a market order's notional is the
+  worst-case fill at those same quotes.
 - **Shape** — the engine does not trust a proposal to be what its label
   says. Every option leg's symbol must be the OCC symbol of the contract the
   leg describes (root, expiration, type, strike); all legs share one
@@ -420,15 +462,15 @@ Definitions the rules share (`aegis/policy/measures.py`):
 
 ### Verdict precedence
 
-After all twenty have run, the verdict is resolved in this order:
+After all twenty-one have run, the verdict is resolved in this order:
 
 1. any `REJECT` → **`REJECT`**, with `failing_rule` set to the first rejecting rule
 2. else any `FLAG` → **`FLAG_ONLY`** — recorded and flagged; nothing executes and nobody is asked
 3. else any `ESCALATE` → **`NEEDS_APPROVAL`** — a human must approve
-4. else → **`AUTO_EXECUTE`** — all twenty passed, the auto tier included
+4. else → **`AUTO_EXECUTE`** — all twenty-one passed, the auto tier included
 
 Options never auto-execute in this phase (`options_escalate`), and a result
-set that is not exactly the twenty registered rules in order is itself a
+set that is not exactly the twenty-one registered rules in order is itself a
 REJECT (`engine_integrity`). `failing_rule` is the *first* rejecting rule in
 the table's order, not the most specific one: a naked short call, whose
 notional is unlimited, is recorded as failing `buying_power` (rule 8), with
@@ -493,7 +535,9 @@ out-of-range values are refused when the config loads.
 | `duplicate_window_minutes` | 60 | `duplicate` |
 | `allow_market_orders` | false | `limit_price_sanity` |
 | `limit_price_tolerance_pct` | 5.0 | `limit_price_sanity` |
-| `min_dte` | 1 | `options_min_dte` |
+| `max_quote_age_seconds.equity` | 120 | `quote_freshness` |
+| `max_quote_age_seconds.option` | 1200 | `quote_freshness` |
+| `min_dte` | 7 | `options_min_dte`, and the floor of the brain's expiration window |
 | `max_loss_per_trade` | 1000.0 | `options_max_loss` |
 | `max_contracts` | 10 | `options_max_contracts` |
 | `reject_short_sales` | false | `short_sale` |
@@ -501,9 +545,15 @@ out-of-range values are refused when the config loads.
 | `auto_execute.enabled` | true | `auto_tier` |
 | `auto_execute.max_notional` | 1000.0 | `auto_tier` |
 
-`min_dte: 1` rejects same-day (0DTE) contracts and nothing else. The brain
-currently reads the nearest expiration, usually 0–1 DTE on these tickers, so
-a stricter value should be paired with a later chain on the brain side.
+`min_dte: 7` keeps option ideas out of the gamma-heavy last week before
+expiry. The brain reads its chain from the nearest expiration at or above
+this same value (see "Which expiration" under the agent brain), so its option
+ideas are never built on contracts this rule rejects. The option quote limit,
+1,200 s, sits above the roughly 900 s delay of free-plan option quotes; the
+equity limit, 120 s, is for real-time IEX quotes.
+
+`brain.snapshot.max_dte` (45) is not a risk limit — it lives in the brain's
+block and only caps how far out the brain looks for a chain.
 
 ### Policy CLIs
 
@@ -516,7 +566,7 @@ python -m aegis.cli.policy limits                 # each limit beside its consum
 ```
 
 `evaluate` prints the proposal, the verdict (and the failing rule for a
-REJECT), all twenty rules with outcome and detail, then the context it judged
+REJECT), all twenty-one rules with outcome and detail, then the context it judged
 against (market state, kill switch and halt, account figures, data
 problems). When the loss limit tripped it says so — `trading HALTED until …`,
 or `trading already HALTED until …` when a longer halt was on record first.
@@ -545,10 +595,11 @@ stderr and exit 1, never a traceback.
 
 - It places no order. Phase 6 adds the paper Executor; until then every
   verdict, `AUTO_EXECUTE` included, is a row in `policy_decisions`.
-- It does not judge how old a quote is. Free-plan option quotes are about 15
-  minutes delayed, and `limit_price_sanity` compares the limit with the mid
-  as fetched.
-- `auto_tier` is exactly the criteria listed in rule 20. It does not ask
+- It does not reject a quote dated after the context's as-of time. The
+  context's clock is read before its quotes are fetched, so a real-time
+  quote is routinely a little ahead of it; such a quote counts as fresh, and
+  there is no bound on how far ahead it may be.
+- `auto_tier` is exactly the criteria listed in rule 21. It does not ask
   whether figures no rule needed for this proposal (cash, options buying
   power on an equity order) could be read.
 
@@ -568,6 +619,7 @@ aegis/
   notify/ dashboard/ stubs for later phases
 tests/               config, cache, model-parsing, pricing, position, store, brain and policy tests (canned JSON, FakeLLM, hand-built contexts, tmp_path DBs)
 docs/phase5/         working documents of the policy-engine phase: spec, decisions, review rulings
+docs/phase5_1/       the Phase 5.1 follow-ups: what changed, why, and the evidence
 ```
 
 ## Roadmap
@@ -578,7 +630,8 @@ docs/phase5/         working documents of the policy-engine phase: spec, decisio
 | 2     | Pricing: our own Greeks/IV fallback when Alpaca omits them |
 | 3     | Persistence: SQLite journal of proposals, orders, fills |
 | 4     | Brain: Claude proposes structured trades |
-| 5     | Policy engine: deterministic gate enforcing risk_limits (this) |
+| 5     | Policy engine: deterministic gate enforcing risk_limits |
+| 5.1   | Expiry floor for the brain's chains, and the quote-age rule (this) |
 | 6     | Execution: paper broker behind the Executor interface |
 | 7     | Notifications |
 | 8     | Dashboard |

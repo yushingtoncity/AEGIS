@@ -8,7 +8,7 @@ pinned by ``tests/test_policy_rules.py::TestFactories`` and must not change.
 The defaults are the "everything is fine" pair: ``make_proposal()`` is a
 small equity LIMIT BUY of a watchlist symbol and ``make_context()`` an open
 market, a healthy account and a fresh quote whose mid is that proposal's
-limit price — together they make all twenty rules PASS (``passing()``), so
+limit price — together they make all twenty-one rules PASS (``passing()``), so
 a test changes exactly the one thing it is about.
 
 Everything is deterministic: ``NOW`` is a fixed Thursday during US market
@@ -122,7 +122,8 @@ def padded(symbol: str) -> str:
 def make_limits(**overrides: Any) -> RiskLimits:
     """``RiskLimits`` with its defaults (the config.yaml placeholders: 2% daily
     loss, 10 trades, 5 positions, watchlist only, 5% position cap, 60-minute
-    duplicate window, no market orders, 5% price tolerance, min DTE 1, $1,000
+    duplicate window, no market orders, 5% price tolerance, quotes at most 120 s
+    old for an equity and 1,200 s for an option, min DTE 7, $1,000
     max loss, 10 contracts, short sales escalate, confidence floor 0.5,
     auto-execute on up to $1,000). ``overrides`` replace fields;
     ``auto_execute`` may be a dict (``{"max_notional": 500}``)."""
@@ -157,17 +158,20 @@ def make_quote(
     spread: float = 0.04,
     bid: float | None = _UNSET,
     ask: float | None = _UNSET,
+    at: datetime | None = NOW,
 ) -> Quote:
     """A two-sided equity quote centred on ``mid`` (default AAPL 199.98 /
     200.02), fetched at ``NOW``. ``bid`` / ``ask`` set a side outright —
-    None for a one-sided quote, bid above ask for a crossed one."""
+    None for a one-sided quote, bid above ask for a crossed one. ``at`` is
+    its venue timestamp (quote and last trade): ``NOW`` by default, so it is
+    fresh in the default context; None for a quote with no timestamp."""
     return Quote(
         symbol=symbol,
         bid=mid - spread / 2 if bid is _UNSET else bid,
         ask=mid + spread / 2 if ask is _UNSET else ask,
         last=mid,
-        quote_time=NOW,
-        last_time=NOW,
+        quote_time=at,
+        last_time=at,
         fetched_at=NOW,
     )
 
@@ -180,15 +184,17 @@ def make_snapshot(
     bid: float | None = _UNSET,
     ask: float | None = _UNSET,
     underlying: str = UNDERLYING,
+    at: datetime | None = NOW,
 ) -> OptionSnapshot:
     """One option contract's quote centred on ``mid`` (the bid floored at
-    0.0), fetched at ``NOW``. ``bid`` / ``ask`` set a side outright."""
+    0.0), fetched at ``NOW``. ``bid`` / ``ask`` set a side outright; ``at``
+    is the venue timestamp (``NOW`` by default; None for none)."""
     return OptionSnapshot(
         symbol=symbol,
         underlying=underlying,
         bid=max(0.0, mid - spread / 2) if bid is _UNSET else bid,
         ask=mid + spread / 2 if ask is _UNSET else ask,
-        quote_time=NOW,
+        quote_time=at,
         fetched_at=NOW,
     )
 
@@ -573,7 +579,7 @@ def non_pass(
 def passing(
     proposal: ProposalUnderReview | None = None, context: PolicyContext | None = None
 ) -> bool:
-    """Whether all twenty rules PASS on the pair — what the engine turns into
+    """Whether all twenty-one rules PASS on the pair — what the engine turns into
     AUTO_EXECUTE. True for the default pair; the sanity check a test runs
     before changing the one thing it is about."""
     return not non_pass(proposal, context)

@@ -191,6 +191,7 @@ def test_shipped_brain_block_prices_cover_every_stage_model():
         "brain:\n  per_cycle_token_cap: 1000\n  daily_token_budget: 999\n",
         "brain:\n  prices_per_mtok:\n    m: {input: -1, output: 5}\n",
         "brain:\n  cadence_minutes: 0\n",
+        "brain:\n  snapshot:\n    max_dte: -1\n",
     ],
 )
 def test_invalid_brain_blocks_rejected(tmp_path, text):
@@ -206,7 +207,11 @@ def test_risk_limits_defaults(tmp_path):
     assert limits.max_position_pct == 5.0
     assert (limits.duplicate_window_minutes, limits.allow_market_orders) == (60, False)
     assert limits.limit_price_tolerance_pct == 5.0
-    assert (limits.min_dte, limits.max_loss_per_trade, limits.max_contracts) == (1, 1000.0, 10)
+    assert (limits.max_quote_age_seconds.equity, limits.max_quote_age_seconds.option) == (
+        120.0,
+        1200.0,
+    )
+    assert (limits.min_dte, limits.max_loss_per_trade, limits.max_contracts) == (7, 1000.0, 10)
     assert (limits.reject_short_sales, limits.min_confidence) == (False, 0.5)
     assert (limits.auto_execute.enabled, limits.auto_execute.max_notional) == (True, 1000.0)
 
@@ -222,6 +227,20 @@ def test_shipped_risk_limits_match_the_code_defaults():
     block = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))["risk_limits"]
     assert set(block) == set(RiskLimits.model_fields)
     assert set(block["auto_execute"]) == {"enabled", "max_notional"}
+    assert set(block["max_quote_age_seconds"]) == {"equity", "option"}
+
+
+def test_shipped_snapshot_window_matches_the_code_default():
+    """brain.snapshot.max_dte is stated in config.yaml, not left to a default."""
+    import yaml
+
+    from aegis.config import SnapshotConfig
+
+    shipped = load_config(DEFAULT_CONFIG_PATH)
+    assert shipped.brain.snapshot.max_dte == SnapshotConfig().max_dte == 45
+    block = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+    assert block["brain"]["snapshot"]["max_dte"] == 45
+    assert shipped.risk_limits.min_dte == 7
 
 
 def test_risk_limits_are_frozen(tmp_path):
@@ -241,6 +260,12 @@ def test_risk_limits_are_frozen(tmp_path):
         "risk_limits:\n  duplicate_window_minutes: -5\n",
         "risk_limits:\n  limit_price_tolerance_pct: -1\n",
         "risk_limits:\n  min_dte: -1\n",
+        "risk_limits:\n  max_quote_age_seconds:\n    equity: -1\n",
+        "risk_limits:\n  max_quote_age_seconds:\n    option: -0.5\n",
+        "risk_limits:\n  max_quote_age_seconds:\n    option: .inf\n",
+        "risk_limits:\n  max_quote_age_seconds:\n    equity: .nan\n",
+        "risk_limits:\n  max_quote_age_seconds:\n    future: 10\n",
+        "risk_limits:\n  max_quote_age_seconds: 120\n",
         "risk_limits:\n  max_loss_per_trade: -1\n",
         "risk_limits:\n  max_contracts: -1\n",
         "risk_limits:\n  min_confidence: 1.5\n",

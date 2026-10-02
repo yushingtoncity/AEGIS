@@ -1,4 +1,4 @@
-"""The twenty rules: each a pure function of (proposal, context) → one ``RuleResult``.
+"""The twenty-one rules: each a pure function of (proposal, context) → one ``RuleResult``.
 
 ``RULES`` is the registry, in the order the engine runs them and the audit
 trail lists them; each function is named exactly as its rule. A rule reads
@@ -24,6 +24,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from datetime import datetime, timedelta, timezone
 
+from aegis.data.models import OptionSnapshot, Quote
 from aegis.policy.measures import (
     TOLERANCE,
     below,
@@ -39,6 +40,8 @@ from aegis.policy.measures import (
     mid_price,
     money,
     notional,
+    priced_quotes,
+    quote_age,
     quote_problems,
     signed_limit,
     structure_problems,
@@ -488,7 +491,7 @@ def max_daily_trades(proposal: ProposalUnderReview, context: PolicyContext) -> R
     return _max_daily_trades(context)
 
 
-# --- 12–13: order hygiene -----------------------------------------------------
+# --- 12–14: order hygiene -----------------------------------------------------
 
 
 def _window(context: PolicyContext) -> timedelta:
@@ -546,6 +549,76 @@ def duplicate(proposal: ProposalUnderReview, context: PolicyContext) -> RuleResu
     )
 
 
+def _seconds(age: float) -> str:
+    return f"{_number(age)}s"
+
+
+def _age_text(age: float) -> str:
+    """``905s old``, or — for a quote stamped after the as-of time, as one
+    fetched after the context's clock was read can be — how far after."""
+    if age < 0:
+        return f"dated {_seconds(-age)} after the as-of time"
+    return f"{_seconds(age)} old"
+
+
+def _quote_finding(
+    label: str, quote: Quote | OptionSnapshot | None, context: PolicyContext, limit: float
+) -> tuple[str | None, float | None]:
+    """``(why it fails, age)`` for one quote the price check depends on:
+    the reason is None for a quote at or under ``limit`` seconds old, the
+    age None for a quote that has no timestamp, or is not there at all."""
+    if quote is None:
+        return f"no quote for {label}", None
+    age = quote_age(quote, context)
+    if age is None:
+        return f"the quote for {label} has no venue timestamp", None
+    if exceeds(age, limit):
+        return (
+            f"the quote for {label} is {_seconds(age)} old, above the limit of {_seconds(limit)}",
+            age,
+        )
+    return None, age
+
+
+def quote_freshness(proposal: ProposalUnderReview, context: PolicyContext) -> RuleResult:
+    """REJECT when a quote the limit-price check depends on — the equity's
+    own quote, or every option leg's — is older than
+    ``max_quote_age_seconds`` for its instrument (``equity`` / ``option``).
+    Age runs from the quote's venue timestamp to the context's as-of time,
+    never from ``fetched_at``. A quote with no timestamp, a missing quote and
+    an option with no legs cannot be shown to be fresh: REJECT.
+
+    It runs just before ``limit_price_sanity``, so a limit judged against a
+    stale mid is rejected for the staleness, named first."""
+    name = "quote_freshness"
+    ages = context.limits.max_quote_age_seconds
+    if proposal.is_equity:
+        key, limit = "risk_limits.max_quote_age_seconds.equity", ages.equity
+    else:
+        key, limit = "risk_limits.max_quote_age_seconds.option", ages.option
+    quotes = priced_quotes(proposal, context)
+    if not quotes:
+        return _rejected(name, f"the option proposal has no legs whose quotes to check ({key})")
+    findings, dated = [], []
+    for symbol, quote in quotes:
+        label = symbol if proposal.is_equity else f"leg {symbol}"
+        if proposal.is_equity and quote is None and context.quote is not None:
+            label = f"{symbol} (the quote in hand is for {context.quote.symbol})"
+        problem, age = _quote_finding(label, quote, context, limit)
+        if problem is not None:
+            findings.append(problem)
+        else:
+            dated.append((age, label))
+    if findings:
+        return _rejected(name, f"{'; '.join(findings)} ({key})")
+    oldest, label = max(dated, key=lambda pair: pair[0])
+    which = f"the quote for {label}" if len(dated) == 1 else f"the oldest, for {label},"
+    return _passed(
+        name,
+        f"{which} is {_age_text(oldest)}, within the limit of {_seconds(limit)} ({key})",
+    )
+
+
 def limit_price_sanity(proposal: ProposalUnderReview, context: PolicyContext) -> RuleResult:
     """REJECT a market order unless ``allow_market_orders``; REJECT a limit
     order with no usable price, no current mid to judge it by, or a price
@@ -586,7 +659,7 @@ def limit_price_sanity(proposal: ProposalUnderReview, context: PolicyContext) ->
     return _passed(name, f"{compared}: {away}")
 
 
-# --- 14–17: options -----------------------------------------------------------
+# --- 15–18: options -----------------------------------------------------------
 
 
 def options_min_dte(proposal: ProposalUnderReview, context: PolicyContext) -> RuleResult:
@@ -682,7 +755,7 @@ def options_escalate(proposal: ProposalUnderReview, context: PolicyContext) -> R
     return _passed(name, "not an option")
 
 
-# --- 18–20: tiers -------------------------------------------------------------
+# --- 19–21: tiers -------------------------------------------------------------
 
 
 def _why_not_closing(proposal: ProposalUnderReview, context: PolicyContext) -> str:
@@ -784,6 +857,7 @@ RULES: tuple[Rule, ...] = (
     max_open_positions,
     max_daily_trades,
     duplicate,
+    quote_freshness,
     limit_price_sanity,
     options_min_dte,
     options_max_loss,

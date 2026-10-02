@@ -187,7 +187,12 @@ class ModelPrice(BaseModel):
 
 
 class SnapshotConfig(BaseModel):
-    """How much market context the scan stage is shown per symbol."""
+    """How much market context the scan stage is shown per symbol.
+
+    ``max_dte`` is the far end of the window a symbol's option chain is
+    picked from; the near end is ``risk_limits.min_dte``, read from there so
+    the brain and the policy engine share one floor.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -195,6 +200,7 @@ class SnapshotConfig(BaseModel):
     headlines_per_symbol: int = Field(default=5, ge=0, le=50)
     stale_after_minutes: float = Field(default=15, gt=0)
     recent_proposals_limit: int = Field(default=10, ge=0)
+    max_dte: int = Field(default=45, ge=0)
 
 
 class BrainConfig(BaseModel):
@@ -238,10 +244,21 @@ class AutoExecuteConfig(BaseModel):
     max_notional: float = Field(default=1000.0, ge=0)
 
 
+class QuoteAgeLimits(BaseModel):
+    """How old, in seconds, a quote the limit-price check depends on may be,
+    per instrument: the equity's own quote, or each option leg's. Age runs
+    from the quote's venue timestamp to the context's as-of time."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+
+    equity: float = Field(default=120.0, ge=0)
+    option: float = Field(default=1200.0, ge=0)
+
+
 class RiskLimits(BaseModel):
     """Risk limits enforced by the Phase 5 policy engine (``aegis.policy``).
 
-    Every number the twenty rules compare against lives here — nothing in
+    Every number the twenty-one rules compare against lives here — nothing in
     ``aegis.policy`` hardcodes one — so limits are versioned configuration,
     not code. The defaults are placeholders sized for the paper account.
     Frozen: a limit cannot be changed on a loaded config, only in
@@ -265,8 +282,9 @@ class RiskLimits(BaseModel):
     duplicate_window_minutes: int = Field(default=60, ge=0)
     allow_market_orders: bool = False
     limit_price_tolerance_pct: float = Field(default=5.0, ge=0)
+    max_quote_age_seconds: QuoteAgeLimits = QuoteAgeLimits()
     # options
-    min_dte: int = Field(default=1, ge=0)
+    min_dte: int = Field(default=7, ge=0)
     max_loss_per_trade: float = Field(default=1000.0, ge=0)
     max_contracts: int = Field(default=10, ge=0)
     # tiers

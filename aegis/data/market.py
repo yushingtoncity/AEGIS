@@ -17,6 +17,7 @@ failures surface as DataError with context. Free-plan behavior baked in:
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from datetime import date, timedelta
 from typing import Any, Sequence
 
@@ -37,7 +38,7 @@ from requests.exceptions import RequestException
 from aegis.config import get_config
 from aegis.data.cache import default_cache
 from aegis.data.clients import option_client, stock_client, trading_client
-from aegis.data.errors import DataError
+from aegis.data.errors import DataError, NoEligibleExpiration
 from aegis.data.models import (
     Bar,
     ChainSnapshot,
@@ -224,9 +225,18 @@ def _daily_option_volumes(symbols: Sequence[str]) -> dict[str, float]:
 
 
 def get_option_chain(
-    underlying: str, expiration: date | str | None = None
+    underlying: str,
+    expiration: date | str | None = None,
+    *,
+    eligible: Callable[[date], bool] | None = None,
 ) -> ChainSnapshot:
     """Full option chain for one expiration (the nearest available if None).
+
+    ``eligible``, used only when ``expiration`` is None, narrows "nearest
+    available" to the nearest listed expiration it accepts: the caller
+    decides which dates qualify, this layer only fetches. When it accepts
+    none, ``NoEligibleExpiration`` is raised and no chain is fetched — a
+    nearer expiration is never returned in its place.
 
     Merges three Alpaca sources: chain snapshots (quotes, IV, Greeks),
     the contract listing (open interest, authoritative strike/type), and
@@ -236,6 +246,11 @@ def get_option_chain(
     underlying = underlying.upper()
     if isinstance(expiration, str):
         expiration = date.fromisoformat(expiration)
+    if expiration is None and eligible is not None:
+        listed = list_expirations(underlying)
+        expiration = next((listed_date for listed_date in listed if eligible(listed_date)), None)
+        if expiration is None:
+            raise NoEligibleExpiration(underlying, tuple(listed))
     ttl = get_config().cache.ttl_seconds.chains
 
     def fetch() -> ChainSnapshot:

@@ -58,7 +58,7 @@ from policy_factories import (
     random_case,
 )
 
-from aegis.config import REPO_ROOT
+from aegis.config import REPO_ROOT, QuoteAgeLimits
 from aegis.policy import engine
 from aegis.policy.engine import (
     ENGINE_INTEGRITY,
@@ -308,14 +308,14 @@ ONE_SHOT = {
 }
 """Ways to hand ``resolve_verdict`` its results as an iterable that can be read once."""
 
-THE_TWENTY = (
+THE_TWENTY_ONE = (
     "kill_switch", "halted", "market_hours", "daily_loss_limit", "no_trade_list",
     "watchlist_only", "invalidation_present", "buying_power", "max_position_pct",
-    "max_open_positions", "max_daily_trades", "duplicate", "limit_price_sanity",
-    "options_min_dte", "options_max_loss", "options_max_contracts", "options_escalate",
-    "short_sale", "min_confidence", "auto_tier",
+    "max_open_positions", "max_daily_trades", "duplicate", "quote_freshness",
+    "limit_price_sanity", "options_min_dte", "options_max_loss", "options_max_contracts",
+    "options_escalate", "short_sale", "min_confidence", "auto_tier",
 )
-"""The user's twenty rules, in order, written out — not read from the registry."""
+"""The user's twenty-one rules, in order, written out — not read from the registry."""
 
 EARLY = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
 """08:00 in New York on the trading date: the market opens in ninety minutes."""
@@ -327,11 +327,11 @@ AT_0931 = datetime(2026, 7, 30, 13, 31, tzinfo=timezone.utc)
 
 
 class TestRunRules:
-    def test_runs_all_twenty_registered_rules_in_order(self):
+    def test_runs_all_twenty_one_registered_rules_in_order(self):
         proposal, context = make_proposal(), make_context()
         results = run_rules(proposal, context)
         assert isinstance(results, tuple)
-        assert len(results) == 20
+        assert len(results) == 21
         assert tuple(result.name for result in results) == RULE_NAMES
         assert results == tuple(rule(proposal, context) for rule in RULES)
 
@@ -340,7 +340,7 @@ class TestRunRules:
             make_proposal(), make_context(), RULES
         )
 
-    @pytest.mark.parametrize("position", range(20))
+    @pytest.mark.parametrize("position", range(21))
     def test_it_never_short_circuits(self, position):
         # Whichever rule rejects, every rule before and after it still runs.
         calls = []
@@ -376,7 +376,7 @@ class TestRunRules:
         assert rejected == [
             "kill_switch", "halted", "market_hours", "daily_loss_limit", "no_trade_list",
             "watchlist_only", "invalidation_present", "buying_power", "max_position_pct",
-            "max_daily_trades", "duplicate", "limit_price_sanity",
+            "max_daily_trades", "duplicate", "quote_freshness", "limit_price_sanity",
         ]
 
     def test_a_rule_that_raises_rejects_and_the_others_still_run(self):
@@ -582,7 +582,7 @@ class TestRunRules:
 
 
 class TestResolveVerdict:
-    def test_all_twenty_pass_is_auto_execute(self):
+    def test_all_twenty_one_pass_is_auto_execute(self):
         assert resolve_verdict(verdict_results()) == (Verdict.AUTO_EXECUTE, None)
 
     @pytest.mark.parametrize("name", RULE_NAMES)
@@ -695,7 +695,7 @@ class TestResolveVerdict:
     @pytest.mark.parametrize("name", RULE_NAMES)
     def test_integrity_a_missing_result(self, name):
         results = tuple(r for r in verdict_results() if r.name != name)
-        assert len(results) == 19
+        assert len(results) == 20
         assert resolve_verdict(results) == (Verdict.REJECT, ENGINE_INTEGRITY)
 
     def test_integrity_an_extra_result(self):
@@ -716,8 +716,8 @@ class TestResolveVerdict:
         results = verdict_results()
         appended = (*results, results[-1])
         in_place = (results[0], *results)
-        replacing = (*results[:5], results[4], *results[6:])  # twenty results, one twice
-        assert len(replacing) == 20
+        replacing = (*results[:5], results[4], *results[6:])  # twenty-one results, one twice
+        assert len(replacing) == 21
         for broken in (appended, in_place, replacing):
             assert resolve_verdict(broken) == (Verdict.REJECT, ENGINE_INTEGRITY)
 
@@ -764,11 +764,11 @@ class TestResolveVerdict:
 
 
 class TestDecide:
-    def test_the_default_pair_is_auto_execute_with_all_twenty_passing(self):
+    def test_the_default_pair_is_auto_execute_with_all_twenty_one_passing(self):
         evaluation = judge()
         assert evaluation.verdict is Verdict.AUTO_EXECUTE
         assert evaluation.failing_rule is None
-        assert len(evaluation.results) == 20
+        assert len(evaluation.results) == 21
         assert {result.outcome for result in evaluation.results} == {PASS}
         assert evaluation.non_pass == ()
         assert evaluation.proposal_id == PROPOSAL_ID
@@ -1106,8 +1106,10 @@ class TestEvilCases:
         sound = judge(declared, context_for(declared))
         assert sound.verdict is Verdict.NEEDS_APPROVAL
         evaluation = judge(misnamed, context_for(declared))  # the same flattering context
-        failing = assert_rejected_by(evaluation, "limit_price_sanity")  # no quote for the 700
+        failing = assert_rejected_by(evaluation, "quote_freshness")  # no quote for the 700
         assert "no quote for leg SPY260821C00700000" in failing.detail
+        price = result_of(evaluation, "limit_price_sanity")
+        assert price.outcome is REJECT and "no quote for leg SPY260821C00700000" in price.detail
         max_loss = result_of(evaluation, "options_max_loss")
         assert max_loss.outcome is REJECT
         assert max_loss.detail == (
@@ -1196,7 +1198,7 @@ class TestEvilCases:
         )
         evaluation = judge(proposal, context)
         assert_rejected_by(evaluation, "kill_switch")
-        assert len(evaluation.results) == 20
+        assert len(evaluation.results) == 21
         assert len(evaluation.non_pass) >= 12
 
 
@@ -1208,7 +1210,7 @@ class TestTiers:
         evaluation = judge()  # 2 AAPL at 200.00 = 400.00, under the 1,000.00 tier
         assert evaluation.verdict is Verdict.AUTO_EXECUTE
         assert evaluation.failing_rule is None
-        assert [result.outcome for result in evaluation.results] == [PASS] * 20
+        assert [result.outcome for result in evaluation.results] == [PASS] * 21
 
     def test_exactly_at_the_max_notional_still_auto_executes(self):
         evaluation = judge(make_proposal(quantity=5.0))  # 5 x 200.00 = 1,000.00
@@ -1312,7 +1314,9 @@ PROPOSAL_STOPS = [
                  id="open-order-on-the-symbol"),
     pytest.param({"limit_price": 140.0}, {}, "limit_price_sanity", id="30%-under-the-mid"),
     pytest.param({"limit_price": 260.0}, {}, "limit_price_sanity", id="30%-over-the-mid"),
-    pytest.param({}, {"quote": None}, "limit_price_sanity", id="no-quote"),
+    pytest.param({}, {"quote": make_quote(at=NOW - timedelta(seconds=121))}, "quote_freshness",
+                 id="stale-quote"),
+    pytest.param({}, {"quote": make_quote(at=None)}, "quote_freshness", id="undated-quote"),
 ]
 """What is wrong with the sale itself (proposal overrides, context overrides)
 and the rule that must reject it."""
@@ -1363,6 +1367,14 @@ class TestClosingSales:
         assert found(evaluation) == {rule: REJECT}
         # But for that one thing it is the sale that auto-executes.
         assert judge(closing_sale(), make_context(positions=HELD)).verdict is Verdict.AUTO_EXECUTE
+
+    def test_a_closing_sale_with_no_quote_is_rejected_by_both_quote_rules(self):
+        # No quote at all: nothing to date and nothing to price. The age is
+        # named first; the price check rejects it too.
+        evaluation = judge(closing_sale(), make_context(positions=HELD, quote=None))
+        failing = assert_rejected_by(evaluation, "quote_freshness")
+        assert "no quote for AAPL" in failing.detail
+        assert found(evaluation) == {"quote_freshness": REJECT, "limit_price_sanity": REJECT}
 
     def test_a_closing_sale_at_market_is_rejected_unless_market_orders_are_allowed(self):
         at_market = closing_sale(order_type=OrderType.MARKET, limit_price=None)
@@ -1545,7 +1557,9 @@ class TestHaltPersistence:
             assert controls.halt_until == NEXT_OPEN
             later = NOW + timedelta(hours=2)
             assert later < controls.halt_until
-            fresh = make_context(now=later, controls=controls, daily_pnl=1_500.0)
+            fresh = make_context(
+                now=later, controls=controls, daily_pnl=1_500.0, quote=make_quote(at=later)
+            )
             decision = evaluate(proposal, fresh, reopened)
             assert decision.verdict is Verdict.REJECT
             assert decision.failing_rule == "halted"
@@ -1577,6 +1591,7 @@ class TestHaltPersistence:
         next_day = make_context(
             now=now,
             market_date=date(2026, 7, 31),
+            quote=make_quote(at=now),
             controls=get_controls(conn),
             clock=make_clock(
                 next_open=NEXT_OPEN + timedelta(days=3),
@@ -1877,6 +1892,7 @@ class TestHaltPersistence:
             next_morning = make_context(
                 now=NEXT_OPEN + timedelta(minutes=1),
                 market_date=date(2026, 7, 31),
+                quote=make_quote(at=NEXT_OPEN + timedelta(minutes=1)),
                 controls=get_controls(reopened),
                 clock=make_clock(
                     next_open=NEXT_OPEN + timedelta(days=3),
@@ -2445,12 +2461,12 @@ class TestPersistence:
         assert trace.decision == second
 
     @pytest.mark.parametrize(("case", "verdict"), VERDICT_CASES)
-    def test_rules_evaluated_lists_all_twenty_rules_in_order(self, conn, case, verdict):
+    def test_rules_evaluated_lists_all_twenty_one_rules_in_order(self, conn, case, verdict):
         proposal, context = case()
         stored(conn, proposal)
         decision = evaluate(proposal, context, conn)
         listed = decision.rules_evaluated
-        assert len(listed) == 20
+        assert len(listed) == 21
         assert [entry["rule"] for entry in listed] == list(RULE_NAMES)
         for entry in listed:
             assert set(entry) == {"rule", "outcome", "detail"}
@@ -2475,7 +2491,7 @@ class TestPersistence:
     @pytest.mark.parametrize(
         ("build", "context_overrides", "notes"),
         [
-            (make_proposal, {}, "AUTO_EXECUTE (all 20 rules passed)"),
+            (make_proposal, {}, "AUTO_EXECUTE (all 21 rules passed)"),
             (low_confidence, {}, "FLAG_ONLY (FLAG: min_confidence)"),
             (
                 lambda: over_the_auto_tier(confidence=0.2),
@@ -2749,7 +2765,7 @@ class TestFailClosedEngine:
             engine, "RULES", tuple(rule for rule in RULES if rule.__name__ != name)
         )
         evaluation = decide(make_proposal(), make_context())
-        assert len(evaluation.results) == 19
+        assert len(evaluation.results) == 20
         assert {result.outcome for result in evaluation.results} == {PASS}
         assert evaluation.verdict is Verdict.REJECT
         assert evaluation.failing_rule == ENGINE_INTEGRITY
@@ -2768,14 +2784,14 @@ class TestFailClosedEngine:
     def test_decide_checks_the_names_it_imported_whatever_rules_is_patched_to(self, monkeypatch):
         """What the integrity guard proves, and no more: the rules that ran
         are the rules ``RULE_NAMES`` lists. ``RULE_NAMES`` is derived from the
-        registry, so the guard is not what pins "exactly these twenty" — a
-        registry shrunk together with its names is judged on nineteen rules.
-        That pin is the literal list: the next test here (``THE_TWENTY``), and
-        ``TestRegistry.test_twenty_rules_in_the_specified_order`` in
+        registry, so the guard is not what pins "exactly these twenty-one" — a
+        registry shrunk together with its names is judged on twenty rules.
+        That pin is the literal list: the next test here (``THE_TWENTY_ONE``), and
+        ``TestRegistry.test_twenty_one_rules_in_the_specified_order`` in
         tests/test_policy_rules.py."""
         monkeypatch.setattr(engine, "RULES", RULES[:-1])
         assert decide(make_proposal(), make_context()).failing_rule == ENGINE_INTEGRITY
-        assert engine.RULE_NAMES == RULE_NAMES and len(engine.RULE_NAMES) == 20
+        assert engine.RULE_NAMES == RULE_NAMES and len(engine.RULE_NAMES) == 21
         # Shrink the names too and the guard has nothing left to object to:
         # one dollar over the auto tier, with auto_tier gone, auto-executes.
         proposal = over_the_auto_tier()
@@ -2785,20 +2801,21 @@ class TestFailClosedEngine:
         monkeypatch.setattr(engine, "RULES", RULES[:-1])
         monkeypatch.setattr(engine, "RULE_NAMES", RULE_NAMES[:-1])
         blessed = decide(proposal, context)
-        assert (blessed.verdict, len(blessed.results)) == (Verdict.AUTO_EXECUTE, 19)
+        assert (blessed.verdict, len(blessed.results)) == (Verdict.AUTO_EXECUTE, 20)
 
-    def test_the_engine_checks_against_the_users_twenty_rules(self):
+    def test_the_engine_checks_against_the_users_twenty_one_rules(self):
         """The engine's own anchor: the names it compares the results with
-        are the user's twenty, written out here — not whatever the registry
+        are the user's twenty-one, written out here — not whatever the registry
         happens to hold."""
-        assert len(THE_TWENTY) == len(set(THE_TWENTY)) == 20
-        assert engine.RULE_NAMES == THE_TWENTY
-        assert tuple(rule.__name__ for rule in engine.RULES) == THE_TWENTY
-        assert inspect.signature(resolve_verdict).parameters["expected"].default == THE_TWENTY
+        assert len(THE_TWENTY_ONE) == len(set(THE_TWENTY_ONE)) == 21
+        assert engine.RULE_NAMES == THE_TWENTY_ONE
+        assert tuple(rule.__name__ for rule in engine.RULES) == THE_TWENTY_ONE
+        assert inspect.signature(resolve_verdict).parameters["expected"].default == THE_TWENTY_ONE
         assert inspect.signature(run_rules).parameters["rules"].default is engine.RULES
-        assert tuple(r.name for r in decide(make_proposal(), make_context()).results) == THE_TWENTY
-        # one name fewer, one more, or two swapped: no longer the twenty
-        results = verdict_results(THE_TWENTY)
+        judged = decide(make_proposal(), make_context())
+        assert tuple(r.name for r in judged.results) == THE_TWENTY_ONE
+        # one name fewer, one more, or two swapped: no longer the twenty-one
+        results = verdict_results(THE_TWENTY_ONE)
         assert resolve_verdict(results) == (Verdict.AUTO_EXECUTE, None)
         assert resolve_verdict(results[:-1]) == (Verdict.REJECT, ENGINE_INTEGRITY)
 
@@ -2809,9 +2826,9 @@ class TestFailClosedEngine:
         assert decision.verdict is Verdict.REJECT
         assert decision.failing_rule == "engine_integrity"
         assert decision.notes == (
-            "REJECT by engine_integrity (19 rule results do not match the 20 registered rules)"
+            "REJECT by engine_integrity (20 rule results do not match the 21 registered rules)"
         )
-        assert len(decision.rules_evaluated) == 19
+        assert len(decision.rules_evaluated) == 20
         (event,) = events(conn)
         assert event.kind == "policy_reject" and event.level is EventLevel.WARNING
         assert event.payload["failing_rule"] == "engine_integrity"
@@ -2825,7 +2842,7 @@ class TestFailClosedEngine:
         monkeypatch.setattr(engine, "RULES", _replacing("buying_power", buying_power))
         decision = evaluate(proposal, make_context(), conn)
         assert decision.verdict is Verdict.REJECT and decision.failing_rule == "buying_power"
-        assert len(decision.rules_evaluated) == 20
+        assert len(decision.rules_evaluated) == 21
         assert decision.rules_evaluated[RULE_NAMES.index("buying_power")] == {
             "rule": "buying_power",
             "outcome": "REJECT",
@@ -2867,10 +2884,47 @@ TRADE_CAP_REACHED = "the orders sent today are at the cap"
 MARKET_ORDER = "a market order, and market orders are not allowed"
 BLANK_INVALIDATION = "the invalidation is blank"
 NO_TRADE_LISTED = "the symbol is on the no-trade list"
+MISSING_QUOTE = "a quote the price check needs is not there"
+UNDATED_QUOTE = "a quote the price check needs has no timestamp"
+STALE_QUOTE = "a quote the price check needs is older than its limit"
+QUOTE_STOPS = (MISSING_QUOTE, UNDATED_QUOTE, STALE_QUOTE)
 ACCOUNT_LEVEL = (
     KILL_SWITCH_ON, HALTED, NO_OPEN_MARKET, PNL_UNKNOWN, LOSS_CAP_REACHED, TRADE_CAP_REACHED,
 )
 """The stops that hold whatever the proposal is — a closing sale included."""
+
+
+def _same(left: str, right: str) -> bool:
+    return left.strip().upper() == right.strip().upper()
+
+
+def _quote_stops(proposal: ProposalUnderReview, context: PolicyContext) -> list[str]:
+    """Why the quotes the limit is judged against cannot be trusted, read off
+    the inputs: the declared equity's own quote, or each leg's (an option
+    with no legs has none to show), dated by ``quote_time`` and measured to
+    ``context.now`` against the instrument's ``max_quote_age_seconds``."""
+    order, ages = proposal.proposal, context.limits.max_quote_age_seconds
+    if order.instrument is Instrument.EQUITY:
+        own = context.quote
+        quotes = [own if own is not None and _same(own.symbol, order.symbol) else None]
+        limit = ages.equity
+    else:
+        quotes = [
+            next((q for q in context.leg_quotes if _same(q.symbol, leg.symbol)), None)
+            for leg in proposal.legs
+        ] or [None]
+        limit = ages.option
+    reasons = set()
+    for quote in quotes:
+        if quote is None:
+            reasons.add(MISSING_QUOTE)
+        elif quote.quote_time is None:
+            reasons.add(UNDATED_QUOTE)
+        else:
+            age = (context.now - quote.quote_time).total_seconds()
+            if age - limit > 1e-9 * max(1.0, abs(age), abs(limit)):
+                reasons.add(STALE_QUOTE)
+    return [reason for reason in QUOTE_STOPS if reason in reasons]
 
 
 def _must_reject(proposal: ProposalUnderReview, context: PolicyContext) -> list[str]:
@@ -2903,6 +2957,7 @@ def _must_reject(proposal: ProposalUnderReview, context: PolicyContext) -> list[
         reasons.append(BLANK_INVALIDATION)
     if order.symbol in limits.no_trade_list:
         reasons.append(NO_TRADE_LISTED)
+    reasons.extend(_quote_stops(proposal, context))
     return reasons
 
 
@@ -3048,8 +3103,8 @@ class TestRandomized:
             assert evaluation.verdict in (
                 Verdict.REJECT, Verdict.FLAG_ONLY, Verdict.NEEDS_APPROVAL, Verdict.AUTO_EXECUTE,
             )
-            # all twenty rules, in order
-            assert len(evaluation.results) == 20
+            # all twenty-one rules, in order
+            assert len(evaluation.results) == 21
             assert tuple(result.name for result in evaluation.results) == RULE_NAMES
             outcomes = [result.outcome for result in evaluation.results]
             assert all(isinstance(outcome, RuleOutcome) for outcome in outcomes)
@@ -3137,8 +3192,13 @@ class TestRandomized:
         assert shapes[True] >= 20 and shapes[False] >= 50, shapes
         assert stopped_by_shape_alone >= 5
         # Every independent invariant was put to the test, many times over ...
-        for reason in (*ACCOUNT_LEVEL, MARKET_ORDER, BLANK_INVALIDATION, NO_TRADE_LISTED):
+        for reason in (
+            *ACCOUNT_LEVEL, MARKET_ORDER, BLANK_INVALIDATION, NO_TRADE_LISTED, MISSING_QUOTE,
+        ):
             assert must_reject[reason] >= 10, (reason, must_reject)
+        # The base sweep stamps every quote it builds at NOW: only the aged
+        # sweep below puts a stale or undated quote in front of the engine.
+        assert must_reject[STALE_QUOTE] == must_reject[UNDATED_QUOTE] == 0
         for reason in (
             *NOT_PLAIN_EQUITY, TIER_OFF, TIER_EMPTY, NOT_A_LIMIT, OFF_WATCHLIST, LOW_CONFIDENCE,
             NO_PRICE, OVER_THE_TIER, NOT_CLOSING,
@@ -3183,7 +3243,7 @@ class TestRandomized:
             assert decision.verdict is evaluation.verdict
             assert decision.failing_rule == evaluation.failing_rule
             assert decision.rules_evaluated == evaluation.rules_evaluated
-            assert len(decision.rules_evaluated) == 20
+            assert len(decision.rules_evaluated) == 21
             halts += evaluation.halt_until is not None
             expected_events += evaluation.verdict is not Verdict.AUTO_EXECUTE
         # record_decision exactly once per evaluation; the halt only when one was named
@@ -3249,6 +3309,158 @@ class TestRandomized:
         assert names_of(calls).count("record_decision") == CASES == len(decisions(conn))
         # Proposals their own context would have let through were stopped by the halt.
         assert rejected_by_the_stored_halt >= 50
+
+
+# --- the randomized sweep, with the quotes aged -------------------------------
+#
+# Every case of the sweep above, judged again with the timestamps of the
+# quotes its price check reads moved — under limits drawn per case — once
+# for each way a quote can be dated. Drawn from its own seed, so the base
+# sweep's cases stay exactly as they were.
+
+AGE_SEED = 20261002
+AGE_LIMITS: tuple[dict[str, float] | None, ...] = (
+    None,  # the defaults: 120 s for an equity, 1,200 s for an option
+    None,
+    {"equity": 0.0, "option": 0.0},
+    {"equity": 30.0, "option": 1e9},
+    {"equity": 1e9, "option": 30.0},
+    {"equity": 900.0, "option": 900.0},
+)
+"""``max_quote_age_seconds`` per case: the defaults twice as often as any other."""
+OVER_BY: tuple[float, ...] = (0.001, 1.0, 60.0, 86_400.0)
+"""How far past its limit a stale quote is dated — at least a millionth of
+the limit, so it is past the float-noise guard (a part in a billion) too."""
+AGINGS = ("stale", "one stale", "undated", "at the limit", "ahead")
+"""Every relevant quote past its limit; one of them past it, the rest inside;
+one of them with no timestamp; every one exactly at its limit; every one
+dated after the as-of time (fetched after the context's clock was read)."""
+FRESH_AGINGS = ("at the limit", "ahead")
+
+
+def _restamped(quote, context: PolicyContext, age: float | None):
+    stamp = None if age is None else context.now - timedelta(seconds=age)
+    return quote.model_copy(update={"quote_time": stamp})
+
+
+def _aged(
+    rng: random.Random, proposal: ProposalUnderReview, context: PolicyContext, aging: str
+) -> PolicyContext:
+    """``context`` with the quotes the price check reads re-dated by ``aging``."""
+    ages = context.limits.max_quote_age_seconds
+    if proposal.is_equity:
+        limit = ages.equity
+        positions = [0] if context.quote is not None else []
+    else:
+        limit = ages.option
+        positions = list(range(len(context.leg_quotes)))
+    if not positions:
+        return context
+    chosen = rng.choice(positions)
+    by_position = {}
+    for position in positions:
+        if aging == "stale" or (aging == "one stale" and position == chosen):
+            by_position[position] = limit + max(rng.choice(OVER_BY), limit * 1e-6)
+        elif aging == "undated" and position == chosen:
+            by_position[position] = None
+        elif aging == "at the limit":
+            by_position[position] = limit
+        elif aging == "ahead":
+            by_position[position] = -rng.choice((0.5, 2.0, 30.0))
+        else:
+            by_position[position] = rng.uniform(0.0, limit)
+    if proposal.is_equity:
+        return context.model_copy(
+            update={"quote": _restamped(context.quote, context, by_position[0])}
+        )
+    quotes = tuple(
+        _restamped(quote, context, by_position[position])
+        for position, quote in enumerate(context.leg_quotes)
+    )
+    return context.model_copy(update={"leg_quotes": quotes})
+
+
+def _aged_sweep():
+    """``(proposal, context with its drawn limits, aging, aged context)``
+    for every case of the base sweep and every aging."""
+    rng = random.Random(AGE_SEED)
+    cases = []
+    for proposal, context in _sweep():
+        drawn = rng.choice(AGE_LIMITS)
+        if drawn is not None:
+            limits = context.limits.model_copy(
+                update={"max_quote_age_seconds": QuoteAgeLimits(**drawn)}
+            )
+            context = context.model_copy(update={"limits": limits})
+        for aging in AGINGS:
+            cases.append((proposal, context, aging, _aged(rng, proposal, context, aging)))
+    return cases
+
+
+class TestRandomizedQuoteAges:
+    def test_the_aged_sweep_is_seeded_and_reaches_every_aging(self):
+        cases = _aged_sweep()
+        assert cases == _aged_sweep()
+        assert len(cases) == CASES * len(AGINGS)
+        stops = Counter(
+            (aging, reason)
+            for proposal, _, aging, aged in cases
+            for reason in _quote_stops(proposal, aged)
+        )
+        assert stops[("stale", STALE_QUOTE)] >= 400
+        assert stops[("one stale", STALE_QUOTE)] >= 400
+        assert stops[("undated", UNDATED_QUOTE)] >= 400
+        for aging in FRESH_AGINGS:
+            assert stops[(aging, STALE_QUOTE)] == stops[(aging, UNDATED_QUOTE)] == 0
+        # one stale leg among fresh ones, many times over
+        mixed = [
+            aged
+            for proposal, _, aging, aged in cases
+            if aging == "one stale" and proposal.is_option and len(aged.leg_quotes) >= 2
+        ]
+        assert len(mixed) >= 50
+        # both instruments under every limit drawn, the defaults included
+        drawn = Counter(
+            (proposal.is_equity, aged.limits.max_quote_age_seconds)
+            for proposal, _, _, aged in cases
+        )
+        assert len(drawn) == 2 * (len(AGE_LIMITS) - 1)
+
+    def test_auto_execute_never_appears_beside_a_stale_or_undated_quote(self):
+        verdicts: Counter = Counter()
+        turned = Counter()  # base AUTO_EXECUTE cases, by aging, and what became of them
+        for proposal, context, aging, aged in _aged_sweep():
+            evaluation = decide(proposal, aged)
+            reasons = _quote_stops(proposal, aged)
+            freshness = result_of(evaluation, "quote_freshness")
+            if reasons:
+                assert evaluation.verdict is Verdict.REJECT, (proposal.id, aging, reasons)
+                assert freshness.outcome is REJECT, (proposal.id, aging, freshness.detail)
+            else:
+                assert freshness.outcome is PASS, (proposal.id, aging, freshness.detail)
+            if evaluation.verdict is Verdict.AUTO_EXECUTE:
+                assert reasons == [] and aging in FRESH_AGINGS
+            verdicts[aging, evaluation.verdict] += 1
+            # A quote's date moves no other rule: rules 1-12 read no quote
+            # time, so where the base case auto-executed, a stale or undated
+            # quote is the FIRST rejection — and a fresh one changes nothing.
+            base = decide(proposal, context)
+            if aging in FRESH_AGINGS:
+                assert evaluation.verdict is base.verdict, (proposal.id, aging)
+                assert evaluation.failing_rule == base.failing_rule
+            if base.verdict is Verdict.AUTO_EXECUTE:
+                if aging in FRESH_AGINGS:
+                    turned[aging, evaluation.verdict] += 1
+                else:
+                    assert evaluation.failing_rule == "quote_freshness", (proposal.id, aging)
+                    assert {r.name for r in evaluation.non_pass} == {"quote_freshness"}
+                    turned[aging, evaluation.verdict] += 1
+        for aging in ("stale", "one stale", "undated"):
+            assert verdicts[aging, Verdict.AUTO_EXECUTE] == 0
+            assert turned[aging, Verdict.REJECT] >= 20, turned
+        for aging in FRESH_AGINGS:
+            assert verdicts[aging, Verdict.AUTO_EXECUTE] >= 20, verdicts
+            assert turned[aging, Verdict.AUTO_EXECUTE] >= 20, turned
 
 
 # --- the engine module itself -------------------------------------------------

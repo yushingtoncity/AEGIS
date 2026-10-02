@@ -18,6 +18,7 @@ negative (a credit); quantities, notionals and exposures are magnitudes.
 from __future__ import annotations
 
 import math
+from datetime import timezone
 
 from aegis.data.models import OptionSnapshot, Quote, parse_occ_symbol
 from aegis.policy.models import PolicyContext, ProposalUnderReview, underlying_of
@@ -331,6 +332,42 @@ def quote_problems(proposal: ProposalUnderReview, context: PolicyContext) -> tup
     if not problems and mid_price(proposal, context) is None:
         problems.append("the net mid of the legs is not a finite number")
     return tuple(problems)
+
+
+def priced_quotes(
+    proposal: ProposalUnderReview, context: PolicyContext
+) -> tuple[tuple[str, Quote | OptionSnapshot | None], ...]:
+    """The quotes ``mid_price`` judges the limit price against, each beside
+    the symbol it must be for.
+
+    Equity: the proposal's own quote — None when the context holds none for
+    its symbol. Option: one snapshot per distinct leg symbol, in leg order —
+    None for a leg that has none. Empty for an option with no legs, which
+    has nothing to price."""
+    if proposal.is_equity:
+        return ((proposal.proposal.symbol, _own_quote(proposal, context)),)
+    quotes: dict[str, tuple[str, OptionSnapshot | None]] = {}
+    for leg in proposal.legs:
+        key = leg.symbol.strip().upper()
+        if key not in quotes:
+            quotes[key] = (leg.symbol, _leg_snapshot(leg, context))
+    return tuple(quotes.values())
+
+
+def quote_age(
+    quote: Quote | OptionSnapshot, context: PolicyContext
+) -> float | None:
+    """Seconds from the quote's venue timestamp (``quote_time``, the time of
+    the bid and ask a mid is made of) to the context's as-of time
+    ``context.now``: negative for a quote stamped after it, None for a quote
+    with no timestamp. Never measured from ``fetched_at`` — that says when
+    we read the quote, not how old the market it shows is."""
+    stamped = quote.quote_time
+    if stamped is None:
+        return None
+    if stamped.tzinfo is None:
+        stamped = stamped.replace(tzinfo=timezone.utc)
+    return known((context.now - stamped).total_seconds())
 
 
 def worst_case_entry(proposal: ProposalUnderReview, context: PolicyContext) -> float | None:
