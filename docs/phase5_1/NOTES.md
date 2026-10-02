@@ -192,7 +192,66 @@ case-sensitive. It was skipped in the baseline too.
 
 ### Mutations
 
-MUTATION_RESULTS
+Following the Phase 5 recipe: a scratch copy of `aegis/`, `tests/`,
+`conftest.py`, `config.yaml` and `.gitignore`; one exact text replacement at
+a time; the whole `tests/` directory run with `-x`, minus the two
+fresh-interpreter architecture suites (they test imports, not this logic).
+The unmutated copy passed first (3,068 tests). KILLED means the suite failed.
+
+**Round 1: 41 of 42 killed.** The survivor was QF3 (`exceeds(age, limit)`
+replaced by a plain `age > limit`). The float-noise test was vacuous: venue
+timestamps resolve to the microsecond, so a quote dated `120 + 1e-9` s back
+is exactly 120 s old. The guard is relative, so it only shows under a large
+limit. The test now checks that, under a limit of a billion seconds, half a
+second past is noise and two seconds past rejects, and that a millisecond
+over the shipped limits rejects.
+
+**Round 2 (QF3 against the fixed test): killed. Final: 42 of 42.**
+
+| # | File | Mutation | Result |
+| - | ---- | -------- | ------ |
+| QF1 | `aegis/policy/rules.py` | threshold one second looser | KILLED |
+| QF2 | `aegis/policy/rules.py` | at the threshold rejects (>=) | KILLED |
+| QF3 | `aegis/policy/rules.py` | no float-noise guard (>) | SURVIVED in round 1; KILLED in round 2 |
+| QF4 | `aegis/policy/rules.py` | future-dated quote judged by `abs(age)` | KILLED |
+| QF5 | `aegis/policy/rules.py` | undated quote counts as fresh | KILLED |
+| QF6 | `aegis/policy/rules.py` | missing quote counts as fresh | KILLED |
+| QF7 | `aegis/policy/rules.py` | option with no legs passes | KILLED |
+| QF8 | `aegis/policy/rules.py` | equity held to the option limit | KILLED |
+| QF9 | `aegis/policy/rules.py` | option held to the equity limit | KILLED |
+| QF10 | `aegis/policy/rules.py` | only the first leg is checked | KILLED |
+| QF11 | `aegis/policy/rules.py` | only the last leg is checked | KILLED |
+| QF12 | `aegis/policy/rules.py` | only the first finding is reported (and it passes when the first is fine) | KILLED |
+| QF13 | `aegis/policy/rules.py` | runs after limit_price_sanity | KILLED |
+| QF14 | `aegis/policy/rules.py` | dropped from the registry | KILLED |
+| M1 | `aegis/policy/measures.py` | age measured from fetched_at | KILLED |
+| M2 | `aegis/policy/measures.py` | equity dated by the last trade | KILLED |
+| M3 | `aegis/policy/measures.py` | age sign flipped | KILLED |
+| M4 | `aegis/policy/measures.py` | equity quote not matched to the symbol | KILLED |
+| M5 | `aegis/policy/measures.py` | option leg quotes read only for the first leg | KILLED |
+| M6 | `aegis/policy/measures.py` | a naive timestamp is not taken as UTC (read as undated) | KILLED |
+| C1 | `config.yaml` | shipped min_dte back to 1 | KILLED |
+| C2 | `aegis/config.py` | code default min_dte back to 1 | KILLED |
+| C3 | `aegis/config.py` | negative quote age accepted | KILLED |
+| C4 | `config.yaml` | shipped option age loosened | KILLED |
+| C5 | `aegis/config.py` | max_dte default drifts from the shipped 45 | KILLED |
+| B1 | `aegis/brain/snapshot.py` | floor exclusive | KILLED |
+| B2 | `aegis/brain/snapshot.py` | cap exclusive | KILLED |
+| B3 | `aegis/brain/snapshot.py` | DTE rounded up (looser than the policy) | KILLED |
+| B4 | `aegis/brain/snapshot.py` | fractional DTE against the cap | KILLED |
+| B5 | `aegis/brain/snapshot.py` | expired contracts admitted | KILLED |
+| B6 | `aegis/brain/snapshot.py` | floor hardcoded, not read from risk_limits | KILLED |
+| B7 | `aegis/brain/snapshot.py` | cap hardcoded, not read from brain.snapshot | KILLED |
+| B8 | `aegis/brain/snapshot.py` | the window is not offered to the fetch (nearest chain) | KILLED |
+| B9 | `aegis/brain/snapshot.py` | the chain fetched is not checked | KILLED |
+| B10 | `aegis/brain/snapshot.py` | no eligible expiration falls back to the nearest | KILLED |
+| B11 | `aegis/brain/snapshot.py` | the nearest-first order is dropped | KILLED |
+| B12 | `aegis/brain/snapshot.py` | the farthest eligible is picked | KILLED |
+| B13 | `aegis/brain/snapshot.py` | the misleading 'option chain missing' line is back | KILLED |
+| D1 | `aegis/data/market.py` | nothing eligible falls back to the nearest listed | KILLED |
+| D2 | `aegis/data/market.py` | eligible ignored | KILLED |
+| D3 | `aegis/data/market.py` | the listing is not reported | KILLED |
+| D4 | `aegis/data/market.py` | an explicit expiration is second-guessed | KILLED |
 
 ## Run on the mini after merge
 
