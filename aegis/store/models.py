@@ -1,11 +1,17 @@
 """Records persisted by the Phase 3 store.
 
-One frozen pydantic model per table, plus ``ProposalTrace`` (the reassembled
-lineage of one proposal) and ``StoreStatus`` (what ``aegis.cli.db status``
-reports). The repository writes these verbatim and reads them back, so the
-column names in ``migrations/`` (``0001_initial.sql``, with ``reasoning``
-rebuilt and ``proposal_legs`` added by ``0002_reasoning_cycles_and_legs.sql``)
-are exactly these field names.
+One frozen pydantic model per record table, plus ``ProposalTrace`` (the
+reassembled lineage of one proposal) and ``StoreStatus`` (what
+``aegis.cli.db status`` reports). The repository writes these verbatim and
+reads them back, so the column names in ``migrations/`` (``0001_initial.sql``,
+with ``reasoning`` rebuilt and ``proposal_legs`` added by
+``0002_reasoning_cycles_and_legs.sql``) are exactly these field names.
+
+The one table that is not a journal of records is ``controls``
+(``0003_controls.sql``): two fixed key/value rows — the kill switch and the
+daily-loss halt — that ``repo.get_controls`` reads together as one
+``Controls``. It has no ``id`` and its rows are set, never appended or
+deleted.
 
 Conventions shared by every record:
 
@@ -227,7 +233,11 @@ class PolicyDecision(StoreRecord):
     decided_at: datetime = Field(default_factory=utcnow)
     verdict: Verdict
     rules_evaluated: list[dict[str, Any]]
-    """One entry per rule, e.g. {"rule": ..., "limit": ..., "observed": ..., "passed": ...}."""
+    """One entry per rule, in the order the rules ran. The policy engine writes
+    one ``{"rule", "outcome", "detail"}`` per rule — all of them, whatever the
+    verdict: the rule's name, its outcome (PASS, FLAG, ESCALATE or REJECT) and
+    the human-readable detail. The column is free-form JSON, so rows written
+    before Phase 5 may carry other keys."""
     failing_rule: str | None = None
     notes: str | None = None
 
@@ -307,6 +317,44 @@ class Event(StoreRecord):
     payload: dict[str, Any] | None = None
 
 
+class Controls(BaseModel):
+    """The operator's control flags, as ``repo.get_controls`` reads the ``controls`` table.
+
+    ``kill_switch`` on means the policy engine rejects every proposal.
+    ``halt_until`` is the instant trading may resume after the daily loss
+    limit tripped (None: no halt on record); it lives in the store so the
+    halt survives a restart and a P&L recovery later in the day.
+
+    The read fails closed. A missing ``kill_switch`` row reads as ON, and a
+    missing or unreadable ``halt_until`` sets ``halt_unknown`` — the engine
+    treats that as halted, because it cannot prove trading is not. Each such
+    finding is spelled out in ``problems`` for the operator.
+
+    The table (``0003_controls.sql``) seeds both rows, CHECKs their values
+    and refuses DELETE, so none of that happens to a store written through
+    the repository: ``problems`` is empty unless the table was altered by
+    hand. ``kill_switch_updated_at`` / ``halt_until_updated_at`` are when
+    each row was last set (None when the stored text will not parse) — the
+    migration's own clock for a control never touched since. Written by
+    ``repo.set_kill_switch`` and ``repo.set_halt_until``; this model is
+    read-only and has no ``id``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    kill_switch: bool = False
+    halt_until: datetime | None = None
+    halt_unknown: bool = False
+    kill_switch_updated_at: datetime | None = None
+    halt_until_updated_at: datetime | None = None
+    problems: tuple[str, ...] = ()
+
+    @field_validator("halt_until", "kill_switch_updated_at", "halt_until_updated_at", mode="after")
+    @classmethod
+    def _utc(cls, value: datetime | None) -> datetime | None:
+        return _to_utc(value) if value is not None else None
+
+
 class TokenUsage(BaseModel):
     """Token totals read back from the reasoning table: ``repo.get_token_usage``
     (a UTC day), ``get_cycle_token_usage`` (one cycle) and
@@ -367,7 +415,8 @@ class StoreStatus(BaseModel):
     applied_migrations: tuple[str, ...]
     pending_migrations: tuple[str, ...]
     row_counts: dict[str, int]
-    """Table name → row count for all ten tables (0 for a table that does not exist)."""
+    """Table name → row count for all eleven tables (0 for a table that does not
+    exist). ``controls`` counts 2 in a migrated store: its two seeded rows."""
     missing_tables: tuple[str, ...] = ()
     """Tables a fully migrated database must have but lacks — one was dropped by hand.
 

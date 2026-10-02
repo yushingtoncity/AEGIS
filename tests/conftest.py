@@ -8,6 +8,17 @@ FIXTURES = Path(__file__).parent / "fixtures"
 EXECUTION = "aegis.execution"
 
 
+@pytest.fixture(autouse=True)
+def plain_cli_output(monkeypatch):
+    """CLI tests compare text. Python 3.14's argparse colours ``--help`` when
+    the terminal asks for it (``FORCE_COLOR``, ``PYTHON_COLORS``, a tty), and
+    no assertion expects ANSI codes — so every test runs with colour off,
+    whatever the shell that launched pytest exports."""
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.delenv("PYTHON_COLORS", raising=False)
+
+
 @pytest.fixture
 def fixture():
     """Load a canned JSON fixture from tests/fixtures by filename."""

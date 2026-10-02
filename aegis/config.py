@@ -227,19 +227,52 @@ class BrainConfig(BaseModel):
             raise KeyError(f"unknown brain stage {name!r}") from exc
 
 
-class RiskLimits(BaseModel):
-    """Risk limits enforced by the Phase 5 policy engine.
+class AutoExecuteConfig(BaseModel):
+    """The auto tier: the only path from a proposal to an order without a
+    human. Only an equity limit order on a watchlist symbol, at or below
+    ``max_notional`` dollars, with every other rule passing, qualifies."""
 
-    Placeholders for now — nothing reads them yet. They live in config from
-    day one so limits are versioned configuration, not code.
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+
+    enabled: bool = True
+    max_notional: float = Field(default=1000.0, ge=0)
+
+
+class RiskLimits(BaseModel):
+    """Risk limits enforced by the Phase 5 policy engine (``aegis.policy``).
+
+    Every number the twenty rules compare against lives here — nothing in
+    ``aegis.policy`` hardcodes one — so limits are versioned configuration,
+    not code. The defaults are placeholders sized for the paper account.
+    Frozen: a limit cannot be changed on a loaded config, only in
+    config.yaml. Every number must be finite: ``.inf`` or ``.nan`` in the
+    YAML would silently switch a limit off, so both are refused at load.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
-    max_position_pct: float = Field(default=5.0, gt=0, le=100)
-    max_open_positions: int = Field(default=5, ge=0)
+    # account-level stops
     daily_loss_limit_pct: float = Field(default=2.0, gt=0, le=100)
+    halt_fallback_hours: float = Field(default=24.0, gt=0)
+    max_daily_trades: int = Field(default=10, ge=0)
+    max_open_positions: int = Field(default=5, ge=0)
+    # what may be traded
     no_trade_list: list[str] = []
+    watchlist_only: bool = True
+    # sizing
+    max_position_pct: float = Field(default=5.0, gt=0, le=100)
+    # order hygiene
+    duplicate_window_minutes: int = Field(default=60, ge=0)
+    allow_market_orders: bool = False
+    limit_price_tolerance_pct: float = Field(default=5.0, ge=0)
+    # options
+    min_dte: int = Field(default=1, ge=0)
+    max_loss_per_trade: float = Field(default=1000.0, ge=0)
+    max_contracts: int = Field(default=10, ge=0)
+    # tiers
+    reject_short_sales: bool = False
+    min_confidence: float = Field(default=0.5, ge=0, le=1)
+    auto_execute: AutoExecuteConfig = AutoExecuteConfig()
 
     @field_validator("no_trade_list")
     @classmethod

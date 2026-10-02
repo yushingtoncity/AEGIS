@@ -1,21 +1,24 @@
 # AEGIS
 
-An agentic trading platform. Phase 0–4 status: project skeleton, the data
+An agentic trading platform. Phase 0–5 status: project skeleton, the data
 layer (Alpaca paper account, stocks, options, news), a pure-math pricing
-engine, a SQLite audit log with operator CLIs, and the agent brain that
-proposes trades into that log. Nothing trades yet — by design.
+engine, a SQLite audit log with operator CLIs, the agent brain that proposes
+trades into that log, and the deterministic policy engine that gives every
+proposal a verdict. Nothing trades yet — by design: there is no Executor
+implementation until Phase 6, so a verdict is all that happens to a proposal.
 
 ## Architecture principles
 
-1. **The LLM proposes; deterministic code disposes.** In later phases, Claude
-   emits structured trade proposals and a deterministic policy engine
-   (`aegis/policy`, Phase 5) gates them against the `risk_limits` in
+1. **The LLM proposes; deterministic code disposes.** Claude emits
+   structured trade proposals (`aegis/brain`) and a deterministic policy
+   engine (`aegis/policy`) gates each one against the `risk_limits` in
    `config.yaml`. Nothing in this codebase may ever let model output reach a
    broker API directly.
 2. **Execution is an abstraction.** `aegis/execution/base.py` defines an
    abstract `Executor` interface so a paper broker and a live broker are
    swappable implementations behind the same seam. Only the policy engine may
-   call an Executor.
+   reference an Executor — `tests/test_policy_architecture.py` fails if any
+   other module does.
 
 Supporting rules: all external reads go through `aegis/data` and return typed
 pydantic models (every one carrying a `fetched_at` UTC timestamp), never raw
@@ -136,8 +139,8 @@ AEGIS takes is reconstructible after the fact.
 - **WAL journaling** is enabled on every connection, with foreign keys on and
   a 5 s busy timeout, so the future dashboard can read while the loop writes.
 - **Schema** lives in versioned SQL files under `aegis/store/migrations/`
-  (`0001_initial.sql`, `0002_reasoning_cycles_and_legs.sql`, …). `open_store` applies pending
-  migrations at startup inside one transaction per file and records each in
+  (`0001_initial.sql`, `0002_reasoning_cycles_and_legs.sql`,
+  `0003_controls.sql`, …). `open_store` applies pending migrations at startup inside one transaction per file and records each in
   `schema_version`; every statement is `IF NOT EXISTS`, so applying twice is
   a no-op, and a database written by newer code is refused rather than
   half-read. An applied file is never edited — schema changes are new files.
@@ -145,10 +148,14 @@ AEGIS takes is reconstructible after the fact.
   models in and out, parameterized queries only (a test greps for anything
   else). Writes: `insert_proposal`, `add_reasoning`, `record_decision`,
   `record_approval` (request, then answer, one row), `upsert_order`,
-  `record_fill`, `snapshot_positions`, `snapshot_pnl`, `log_event`. Reads:
-  `get_proposal`, `get_order`, `get_open_orders`, `get_daily_pnl`,
-  `get_recent_events`, and `get_proposal_trace(proposal_id)`, which returns
-  the whole lineage in one call. `client_order_id` is the idempotency key:
+  `record_fill`, `snapshot_positions`, `snapshot_pnl`, `log_event`, and the
+  control flags `set_kill_switch` / `set_halt_until`. `record_decision` and
+  the two control writers take an optional `event`, written in the same
+  transaction as the row it describes. Reads: `get_proposal`, `get_order`,
+  `get_open_orders`, `get_daily_pnl`, `get_recent_events`, `get_controls`,
+  `get_proposals_since`, `get_latest_undecided_proposal`,
+  `count_orders_submitted_between`, and `get_proposal_trace(proposal_id)`,
+  which returns the whole lineage in one call. `client_order_id` is the idempotency key:
   `upsert_order` called twice with the same one yields exactly one row,
   keeping the original `id`. Failures surface as `StoreError` with the
   operation and record id, never a raw `sqlite3` exception.
@@ -170,10 +177,12 @@ AEGIS takes is reconstructible after the fact.
 | `position_snapshots` | positions as seen each cycle | `taken_at`, `symbol`, `quantity`, `avg_cost`, `market_value`, `unrealized_pnl` |
 | `pnl_snapshots` | account P&L each cycle | `taken_at`, `equity`, `cash`, `buying_power`, `daily_pnl`, `realized_pnl`, `unrealized_pnl` |
 | `events` | risk-limit trips, kill-switch toggles, heartbeats, errors | `occurred_at`, `level`, `kind`, `message`, `payload` (JSON) |
+| `controls` | the operator's stop flags; exactly two rows, never deleted | `key` (`kill_switch` / `halt_until`), `value` (`on` / `off`; an ISO timestamp or empty), `updated_at` |
 | `schema_version` | applied migrations | `version`, `name`, `applied_at` |
 
 Every `id` is a uuid4 string; enum columns are CHECK-constrained to the
-values above; every foreign key is indexed.
+values above; every foreign key is indexed. (`controls` is keyed by its
+`key`.)
 
 ### Store CLIs
 
@@ -194,8 +203,8 @@ authority**: it reads market data through `aegis.data`, prices structures
 with `aegis.pricing`, calls Claude through one module (`aegis/brain/llm.py`),
 and its only outputs are rows in the store — one `reasoning` row per stage
 and, when it has a compelling idea, one `proposals` row (plus
-`proposal_legs` for multi-leg structures). Nothing consumes proposals yet;
-the Phase 5 policy engine will gate every one of them. No module under
+`proposal_legs` for multi-leg structures). The policy engine (Phase 5,
+below) gates every one of them; the brain never sees or calls it. No module under
 `aegis/brain` may import `aegis.execution`. `tests/test_brain_architecture.py`
 enforces that three ways: a static scan of every brain module (and the brain
 CLI) for any import of `aegis.execution`, any dynamic-import or
@@ -289,6 +298,260 @@ python -m aegis.cli.brain usage                # today's tokens and estimated sp
 per stage, and an estimated cost clearly labelled as an estimate; follow it
 with `python -m aegis.cli.trace <proposal_id>` to see the stored lineage.
 
+## Policy engine (Phase 5)
+
+`aegis/policy` is the deterministic gate between a proposal and any order —
+the "deterministic code disposes" half of the governing principle. It is
+pure Python with **no model calls, ever**: the same proposal and the same
+context always produce the same verdict. Every proposal gets exactly one of
+four verdicts — `REJECT`, `FLAG_ONLY`, `NEEDS_APPROVAL` or `AUTO_EXECUTE` —
+and `AUTO_EXECUTE` is unreachable unless every one of the twenty rules
+passed. A verdict is all this phase produces: there is no Executor
+implementation yet, so even `AUTO_EXECUTE` places no order until Phase 6.
+
+It is also the only package that may ever reference an `Executor`.
+`tests/test_policy_architecture.py` statically scans every module outside
+`aegis/policy` and `aegis/execution` and fails on any import of
+`aegis.execution` (in any form), any identifier containing `executor`, the
+interface's order methods (`submit_order`, `cancel_order`, `close_position`),
+or any string naming the package; a fresh-interpreter run then imports every
+one of those modules and fails if any of them asked for the execution
+package or holds a module, class or instance from it. The static scan is a
+tripwire, not a sandbox — a deliberately obfuscated, dormant reference is
+beyond it, and the test's docstring says exactly what it does not see. The
+same test pins the engine's purity: nothing under `aegis/policy` imports
+`anthropic`, the brain, the broker or a network library, and only
+`context.py` may read the clock or fetch data.
+
+The spec the phase was built against, and the decisions and review rulings
+taken along the way, are kept in `docs/phase5/`.
+
+### Inputs: the proposal and the context
+
+`engine.evaluate(proposal, context, conn)` judges a stored proposal (with its
+option legs) against a frozen `PolicyContext` and records the verdict;
+`engine.decide(proposal, context)` is its pure half. If a verdict depends on
+something, it is a field of one of those two values — no rule reads a wall
+clock, the network, the store or the config. `context.build_context` fills
+the context from `aegis.data` and `aegis.store`:
+
+- account state — equity, cash, buying power, options buying power — and open
+  positions; start-of-day equity (Alpaca's `last_equity`) and today's P&L
+- the market clock (`aegis.data.market.get_market_clock`: `is_open`,
+  `next_open`, `next_close`)
+- current quotes: the instrument's own, and one per leg for an option
+- the pricing engine's expiry analysis of the structure at the proposal's
+  price — max loss, max profit, breakevens, `unlimited_risk`
+- from the store: open orders, orders sent today, the other proposals inside
+  the duplicate window, and the control flags
+- the limits (`risk_limits`), the watchlist and the contract multiplier
+
+Tests build contexts by hand, so the whole suite runs with no network.
+
+**Unknown is never good news.** A value that could not be fetched is `None`
+with the reason recorded; NaN and infinity count as unknown; and a rule that
+needs an unknown value rejects. A failed fetch never aborts the build — the
+proposal still reaches the engine and is rejected there, on the record. A
+rule that raises is itself a REJECT, and the engine still runs the rest.
+
+### The twenty rules
+
+Every rule is a pure function of `(proposal, context)` returning a name, an
+outcome (`PASS`, `FLAG`, `ESCALATE` or `REJECT`) and a human-readable detail
+with the numbers it compared. Every number comes from `risk_limits` in
+`config.yaml`; nothing in `aegis/policy` hardcodes one. All twenty always
+run, in this order — the engine never short-circuits — so the audit trail
+shows what each one found.
+
+| # | Rule | Trips when | Outcome |
+| - | ---- | ---------- | ------- |
+| 1 | `kill_switch` | the kill switch is on | REJECT |
+| 2 | `halted` | `halt_until` is in the future, or cannot be read | REJECT |
+| 3 | `market_hours` | the market is closed, or the clock is missing or stale | REJECT |
+| 4 | `daily_loss_limit` | today's P&L ≤ −`daily_loss_limit_pct` of start-of-day equity — and this trip sets the halt | REJECT |
+| 5 | `no_trade_list` | the symbol or its underlying is on `no_trade_list` | REJECT |
+| 6 | `watchlist_only` | enabled and the underlying is not in the watchlist | REJECT |
+| 7 | `invalidation_present` | the invalidation is empty | REJECT |
+| 8 | `buying_power` | notional > the buying power available to it (options: options buying power), or none is available | REJECT |
+| 9 | `max_position_pct` | notional + existing exposure in the underlying > `max_position_pct` of equity | REJECT |
+| 10 | `max_open_positions` | a new underlying while distinct underlyings held or pending ≥ `max_open_positions` | REJECT |
+| 11 | `max_daily_trades` | orders sent today ≥ `max_daily_trades` | REJECT |
+| 12 | `duplicate` | an earlier proposal with the same symbol, instrument and side within `duplicate_window_minutes`, or an open order on one of the proposal's symbols | REJECT |
+| 13 | `limit_price_sanity` | a market order while `allow_market_orders` is false; a limit more than `limit_price_tolerance_pct` from the current mid; no usable limit or no mid to check it against | REJECT |
+| 14 | `options_min_dte` | any leg with fewer than `min_dte` days to expiration | REJECT |
+| 15 | `options_max_loss` | max loss > `max_loss_per_trade`; **unlimited risk, unconditionally**; a structure that cannot be analysed or whose shape is not what its instrument says (see Shape) | REJECT |
+| 16 | `options_max_contracts` | any leg quantity > `max_contracts` | REJECT |
+| 17 | `options_escalate` | the instrument is an option — always (and anything option-like under an equity label) | ESCALATE |
+| 18 | `short_sale` | an equity sell that does not close an existing long | ESCALATE (REJECT if `reject_short_sales`) |
+| 19 | `min_confidence` | confidence < `min_confidence` | FLAG |
+| 20 | `auto_tier` | anything but: `auto_execute.enabled`, a plain equity, a buy or a sell closing a long, a limit order, a watchlist symbol, a known notional ≤ `auto_execute.max_notional` | ESCALATE |
+
+Definitions the rules share (`aegis/policy/measures.py`):
+
+- **Notional** — equity: quantity × price (the limit, or the worst-case quote
+  for a market order). Option bought for a debit: limit × the contract
+  multiplier (100) × quantity. Option sold for a credit: the structure's max
+  loss. Unlimited risk is an infinite notional.
+- **Exposure** is measured per underlying: the market value of every position
+  on the ticker (shares and contracts) plus the notional of open orders on it.
+- **A position** is a distinct underlying held or pending, so a four-leg
+  condor is one position, not four.
+- **A closing sale** is an equity sell of no more than the long quantity
+  held — and there must be one. It consumes no buying power, adds no exposure
+  and no position, and can qualify for the auto tier. Every other rule still
+  applies to it: the kill switch, a halt, a closed market, the loss limit and
+  the trade cap stop a closing sale like anything else.
+- **DTE** counts calendar days from the trading date (the date in the
+  exchange's timezone) to expiration: 0 expires today.
+- **Shape** — the engine does not trust a proposal to be what its label
+  says. Every option leg's symbol must be the OCC symbol of the contract the
+  leg describes (root, expiration, type, strike); all legs share one
+  underlying and one expiration; a proposal named by a contract symbol has
+  exactly that one leg; an equity proposal carries no legs and is not named
+  by an option symbol; and no symbol contains whitespace (the padded OCC
+  form included) or a non-ASCII character. Anything else is rejected by
+  `options_max_loss`, and can never reach the auto tier. Symbols are matched
+  as the instrument they name, so another spelling of a listed or already
+  working contract is still that contract to `no_trade_list` and `duplicate`.
+- Comparisons carry a tiny float-noise tolerance (one part in a billion), so
+  `10 × 100.1` is not "above" `1001.00`. It is not a limit, and it never
+  turns nothing into something: zero buying power, a zero auto tier and a
+  sale against no holding admit nothing, however small the order.
+
+### Verdict precedence
+
+After all twenty have run, the verdict is resolved in this order:
+
+1. any `REJECT` → **`REJECT`**, with `failing_rule` set to the first rejecting rule
+2. else any `FLAG` → **`FLAG_ONLY`** — recorded and flagged; nothing executes and nobody is asked
+3. else any `ESCALATE` → **`NEEDS_APPROVAL`** — a human must approve
+4. else → **`AUTO_EXECUTE`** — all twenty passed, the auto tier included
+
+Options never auto-execute in this phase (`options_escalate`), and a result
+set that is not exactly the twenty registered rules in order is itself a
+REJECT (`engine_integrity`). `failing_rule` is the *first* rejecting rule in
+the table's order, not the most specific one: a naked short call, whose
+notional is unlimited, is recorded as failing `buying_power` (rule 8), with
+`max_position_pct` and `options_max_loss` rejecting it further down the same
+list. The decision is written through the store's `record_decision` —
+exactly once per evaluation, with every rule's outcome and detail in
+`rules_evaluated` — together with an event for every verdict other than
+`AUTO_EXECUTE` (`policy_reject`, `policy_flag_only`,
+`policy_needs_approval`), in the same transaction.
+
+### Controls: the kill switch and the halt
+
+Migration `0003_controls.sql` adds a `controls` table (`key`, `value`,
+`updated_at`) with two rows that always exist:
+
+| Key | Value | Meaning |
+| --- | ----- | ------- |
+| `kill_switch` | `on` / `off` | on: every proposal is rejected |
+| `halt_until` | an ISO timestamp, or empty | trading is halted until that instant |
+
+When `daily_loss_limit` trips, the engine sets `halt_until` to the next
+market open and logs a `risk_limit_tripped` event in the same transaction.
+Because the halt lives in the store, it survives a restart, and a P&L
+recovery later in the day does not reopen trading — the `halted` rule keeps
+rejecting until the next open. Two refinements keep that promise at the
+edges: a trip *before* the day's session opens halts through that session's
+close (a halt to the opening bell would expire just as trading began, and a
+recovery by then would reopen it the same day), and if the clock has no next
+open at that moment the halt lasts `halt_fallback_hours`. The engine only
+ever extends a halt: its write is a compare-and-set against the stored
+value, so a later trip — or an evaluation working from an older snapshot —
+neither shortens nor re-logs it. Shortening or clearing a halt is an
+operator's decision, and this phase ships no command for it: the repository
+layer's `set_halt_until(conn, None)` is the way, or waiting it out.
+
+The stop flags are read as late as possible. Building a context takes several
+network calls, so the engine reads the kill switch and the halt from the
+store once more just before it records a verdict and judges under the
+stricter of the two readings: a switch set while a context was being built
+is honoured, and nothing the context already holds is lifted.
+
+The table defends itself: the key and value are CHECK-constrained, a trigger
+refuses to delete either row, and the read fails closed — a missing or
+unreadable kill-switch row reads as ON and an unreadable halt reads as
+halted, each with the reason listed by `kill status`.
+
+### Limits (`config.yaml` → `risk_limits`)
+
+Every value is a labelled placeholder sized for the $100k paper account; live
+sizing gets revisited before Phase 11. Unknown keys, non-finite numbers and
+out-of-range values are refused when the config loads.
+
+| Key | Placeholder | Used by |
+| --- | ----------- | ------- |
+| `daily_loss_limit_pct` | 2.0 | `daily_loss_limit` |
+| `halt_fallback_hours` | 24 | the halt, when the clock has no next open |
+| `max_daily_trades` | 10 | `max_daily_trades` |
+| `max_open_positions` | 5 | `max_open_positions` |
+| `no_trade_list` | `[]` | `no_trade_list` |
+| `watchlist_only` | true | `watchlist_only` |
+| `max_position_pct` | 5.0 | `max_position_pct` |
+| `duplicate_window_minutes` | 60 | `duplicate` |
+| `allow_market_orders` | false | `limit_price_sanity` |
+| `limit_price_tolerance_pct` | 5.0 | `limit_price_sanity` |
+| `min_dte` | 1 | `options_min_dte` |
+| `max_loss_per_trade` | 1000.0 | `options_max_loss` |
+| `max_contracts` | 10 | `options_max_contracts` |
+| `reject_short_sales` | false | `short_sale` |
+| `min_confidence` | 0.5 | `min_confidence` |
+| `auto_execute.enabled` | true | `auto_tier` |
+| `auto_execute.max_notional` | 1000.0 | `auto_tier` |
+
+`min_dte: 1` rejects same-day (0DTE) contracts and nothing else. The brain
+currently reads the nearest expiration, usually 0–1 DTE on these tickers, so
+a stricter value should be paired with a later chain on the brain side.
+
+### Policy CLIs
+
+```bash
+python -m aegis.cli.policy evaluate PROPOSAL_ID   # judge one proposal and record the decision
+python -m aegis.cli.policy evaluate --latest      # ...the newest proposal without a decision
+python -m aegis.cli.policy evaluate --latest --dry-run   # print the verdict and every rule; write nothing
+python -m aegis.cli.policy kill on|off|status     # the kill switch (every on/off is logged as a kill_switch event)
+python -m aegis.cli.policy limits                 # each limit beside its consumption and headroom
+```
+
+`evaluate` prints the proposal, the verdict (and the failing rule for a
+REJECT), all twenty rules with outcome and detail, then the context it judged
+against (market state, kill switch and halt, account figures, data
+problems). When the loss limit tripped it says so — `trading HALTED until …`,
+or `trading already HALTED until …` when a longer halt was on record first.
+It exits 0 whenever a verdict was produced, whatever the verdict; with
+nothing to judge (`--latest` and no undecided proposal, an unknown id) it
+prints one line and exits 1. Evaluating a proposal that already has a
+decision adds another one — the trace shows them all.
+
+`kill status` prints the switch, the halt and anything the store could not
+read about either. `limits` prints the market, switch and halt state, which
+account-level rules block trading right now, the distance to the daily loss
+cap, positions and trades used, buying power, exposure per underlying
+against the position cap, and the auto-execute tier; it is a thin formatter
+over `aegis.policy.limits.limits_report`, the same function the Phase 8
+dashboard will read, and every figure in it is computed by the code the
+rule that enforces it uses.
+
+`evaluate` and `limits` read live Alpaca data. `evaluate` brings an existing
+store up to date but never creates one; `evaluate --dry-run`, `kill status`
+and `limits` write no row and neither create nor migrate a database — a
+pending migration is a clean error whose fix is `python -m aegis.cli.db
+init`. All take `--db PATH` (`:memory:` is refused); a failure is one line on
+stderr and exit 1, never a traceback.
+
+### What the gate does not do
+
+- It places no order. Phase 6 adds the paper Executor; until then every
+  verdict, `AUTO_EXECUTE` included, is a row in `policy_decisions`.
+- It does not judge how old a quote is. Free-plan option quotes are about 15
+  minutes delayed, and `limit_price_sanity` compares the limit with the mid
+  as fetched.
+- `auto_tier` is exactly the criteria listed in rule 20. It does not ask
+  whether figures no rule needed for this proposal (cash, options buying
+  power on an equity order) could be read.
+
 ## Repo layout
 
 ```
@@ -299,10 +562,12 @@ aegis/
   pricing/           Black-Scholes, Greeks, IV, time to expiry, position risk, enrich
   store/             SQLite audit log: models, db + migrations/, typed repo
   brain/             scan -> thesis -> proposal: llm client, prompts/, snapshot, stages, cycle
+  policy/            the deterministic gate: models, context, measures, rules, engine, limits
   execution/base.py  abstract Executor interface (no implementation yet)
-  cli/               operator tools: check, snapshot, db, trace, brain
-  policy/ notify/ dashboard/   stubs for later phases
-tests/               config, cache, model-parsing, pricing, position, store and brain tests (canned JSON, FakeLLM, tmp_path DBs)
+  cli/               operator tools: check, snapshot, db, trace, brain, policy
+  notify/ dashboard/ stubs for later phases
+tests/               config, cache, model-parsing, pricing, position, store, brain and policy tests (canned JSON, FakeLLM, hand-built contexts, tmp_path DBs)
+docs/phase5/         working documents of the policy-engine phase: spec, decisions, review rulings
 ```
 
 ## Roadmap
@@ -312,8 +577,8 @@ tests/               config, cache, model-parsing, pricing, position, store and 
 | 0–1   | Skeleton + data layer |
 | 2     | Pricing: our own Greeks/IV fallback when Alpaca omits them |
 | 3     | Persistence: SQLite journal of proposals, orders, fills |
-| 4     | Brain: Claude proposes structured trades (this) |
-| 5     | Policy engine: deterministic gate enforcing risk_limits |
+| 4     | Brain: Claude proposes structured trades |
+| 5     | Policy engine: deterministic gate enforcing risk_limits (this) |
 | 6     | Execution: paper broker behind the Executor interface |
 | 7     | Notifications |
 | 8     | Dashboard |

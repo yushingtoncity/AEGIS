@@ -8,6 +8,11 @@ read while the loop writes. The schema lives in versioned SQL files under
 ``migrations/``, applied by ``open_store`` and tracked in ``schema_version``;
 failures are wrapped in ``StoreError`` with context, like ``DataError`` in
 the data layer.
+
+Since Phase 5 it also holds the operator's ``controls`` — the kill switch
+and the daily-loss halt — so that both survive a restart. ``get_controls``
+reads them and fails closed; ``set_kill_switch`` / ``set_halt_until`` write
+them, each with its audit event in the same transaction.
 """
 
 from aegis.store.db import connect, migrate, open_store, schema_version
@@ -17,6 +22,7 @@ from aegis.store.models import (
     Approval,
     ApprovalResponse,
     Broker,
+    Controls,
     Event,
     EventLevel,
     Fill,
@@ -40,14 +46,18 @@ from aegis.store.models import (
 )
 from aegis.store.repo import (
     add_reasoning,
+    count_orders_submitted_between,
+    get_controls,
     get_cycle_reasoning,
     get_cycle_token_usage,
     get_daily_pnl,
+    get_latest_undecided_proposal,
     get_open_orders,
     get_order,
     get_proposal,
     get_proposal_legs,
     get_proposal_trace,
+    get_proposals_since,
     get_recent_events,
     get_recent_proposals,
     get_token_usage,
@@ -58,6 +68,8 @@ from aegis.store.repo import (
     record_approval,
     record_decision,
     record_fill,
+    set_halt_until,
+    set_kill_switch,
     snapshot_pnl,
     snapshot_positions,
     upsert_order,
@@ -68,6 +80,7 @@ __all__ = [
     "Approval",
     "ApprovalResponse",
     "Broker",
+    "Controls",
     "Event",
     "EventLevel",
     "Fill",
@@ -90,14 +103,18 @@ __all__ = [
     "Verdict",
     "add_reasoning",
     "connect",
+    "count_orders_submitted_between",
+    "get_controls",
     "get_cycle_reasoning",
     "get_cycle_token_usage",
     "get_daily_pnl",
+    "get_latest_undecided_proposal",
     "get_open_orders",
     "get_order",
     "get_proposal",
     "get_proposal_legs",
     "get_proposal_trace",
+    "get_proposals_since",
     "get_recent_events",
     "get_recent_proposals",
     "get_token_usage",
@@ -112,6 +129,8 @@ __all__ = [
     "record_decision",
     "record_fill",
     "schema_version",
+    "set_halt_until",
+    "set_kill_switch",
     "snapshot_pnl",
     "snapshot_positions",
     "upsert_order",

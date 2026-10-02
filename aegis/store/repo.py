@@ -29,6 +29,19 @@ the lineage of a proposal that does not exist is a caller bug worth a
 clean error. The token reads (``get_token_usage`` and friends) are what the
 brain's budget guard measures against.
 
+The ``controls`` table (migration 0003) is the one thing here that is not a
+journal: two fixed rows, the kill switch and the daily-loss halt.
+``set_kill_switch`` / ``set_halt_until`` upsert a row and return all the
+controls as read back in that transaction (``set_halt_until(...,
+only_extend=True)`` is a compare-and-set: it never shortens a stored
+halt); ``get_controls`` reads them and fails closed — a row that is missing
+or will not parse never raises, it reads as "kill switch on" / "halt
+unknown" with the reason in ``problems``, because a gate that cannot read
+its own stop flags must stay shut. Those two writers and
+``record_decision`` take an optional ``event``: the audit event is inserted
+in the same transaction as the write it describes, so a control change (or
+a verdict) and its event land together or not at all.
+
 Timestamps are stored as ``datetime.isoformat()`` of an aware UTC value —
 one fixed text shape (``…T14:05:00+00:00``), so text comparison against
 ISO bounds (``get_daily_pnl``, ``get_token_usage``) is chronological; a leg's
@@ -53,6 +66,7 @@ from aegis.store.models import (
     Approval,
     ApprovalResponse,
     Broker,
+    Controls,
     Event,
     EventLevel,
     Fill,
@@ -94,6 +108,16 @@ _OPEN_ORDERS_SQL = (
     + ") ORDER BY updated_at, rowid"
 )
 
+# The two rows of the ``controls`` table (migration 0003) and the kill
+# switch's two values; ``halt_until`` holds '' or an ISO-8601 instant.
+_KILL_SWITCH = "kill_switch"
+_HALT_UNTIL = "halt_until"
+_SWITCH_ON = "on"
+_SWITCH_OFF = "off"
+
+# How much of an unreadable stored value a ``Controls.problems`` line quotes.
+_SHOWN_MAX = 60
+
 
 # --- column <-> field conversion --------------------------------------------
 
@@ -105,6 +129,21 @@ def _iso(value: datetime | None) -> str | None:
 
 def _from_iso(text: str | None) -> datetime | None:
     return datetime.fromisoformat(text) if text is not None else None
+
+
+def _utc(value: datetime, name: str = "timestamp") -> datetime:
+    """A caller's instant as the store compares it: naive is taken as UTC, any
+    other offset converted — what the models do to a record's own timestamps.
+
+    Anything but a ``datetime`` is a TypeError, which every caller turns
+    into a StoreError like the rest of ``_REPO_ERRORS``: a bare ``date`` or
+    ISO text must not reach a query as a bound it was never meant to be.
+    """
+    if not isinstance(value, datetime):
+        raise TypeError(f"{name} must be a datetime, not {type(value).__name__}")
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _json(value: Any) -> str | None:
@@ -374,8 +413,39 @@ def link_reasoning_to_proposal(conn: sqlite3.Connection, cycle_id: str, proposal
     return linked
 
 
-def record_decision(conn: sqlite3.Connection, decision: PolicyDecision) -> PolicyDecision:
-    """Record the policy engine's verdict on a proposal (which must exist)."""
+def _insert_event(conn: sqlite3.Connection, event: Event) -> None:
+    """The ``events`` INSERT on its own, for a caller that already holds the transaction.
+
+    ``log_event`` is this inside a transaction of its own. The writers that
+    take an ``event`` (``record_decision``, ``set_kill_switch``,
+    ``set_halt_until``) run it inside theirs, so the event and the write it
+    describes commit together or roll back together. Raises what SQLite and
+    the JSON encoder raise; the caller wraps it.
+    """
+    conn.execute(
+        "INSERT INTO events (id, occurred_at, level, kind, message, payload)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            event.id,
+            _iso(event.occurred_at),
+            event.level.value,
+            event.kind,
+            event.message,
+            _json(event.payload),
+        ),
+    )
+
+
+def record_decision(
+    conn: sqlite3.Connection, decision: PolicyDecision, *, event: Event | None = None
+) -> PolicyDecision:
+    """Record the policy engine's verdict on a proposal (which must exist).
+
+    ``event``, when given, is inserted in the same transaction: the decision
+    and the event announcing it land together or not at all. An event that
+    cannot be written (a reused id, a payload JSON cannot carry) rolls the
+    decision back, and the StoreError names the decision.
+    """
     try:
         with transaction(conn):
             conn.execute(
@@ -391,6 +461,8 @@ def record_decision(conn: sqlite3.Connection, decision: PolicyDecision) -> Polic
                     decision.notes,
                 ),
             )
+            if event is not None:
+                _insert_event(conn, event)
     except _REPO_ERRORS as exc:
         raise StoreError("record decision", decision.id, exc) from exc
     return decision
@@ -556,21 +628,113 @@ def log_event(conn: sqlite3.Connection, event: Event) -> Event:
     """Append an operational event (risk-limit trip, kill switch, heartbeat, error)."""
     try:
         with transaction(conn):
-            conn.execute(
-                "INSERT INTO events (id, occurred_at, level, kind, message, payload)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    event.id,
-                    _iso(event.occurred_at),
-                    event.level.value,
-                    event.kind,
-                    event.message,
-                    _json(event.payload),
-                ),
-            )
+            _insert_event(conn, event)
     except _REPO_ERRORS as exc:
         raise StoreError("log event", event.id, exc) from exc
     return event
+
+
+def _write_control(
+    conn: sqlite3.Connection,
+    key: str,
+    value: str,
+    now: datetime | None,
+    event: Event | None,
+    *,
+    not_before: datetime | None = None,
+) -> Controls:
+    """Upsert one ``controls`` row, with its audit event, and read all the controls back.
+
+    One transaction: the row, the event (when given) and the read-back. The
+    row normally exists (the migration seeds it and nothing may delete it),
+    so this is an UPDATE in practice; the INSERT half restores a row that
+    was removed by hand. Raises raw — the two public writers wrap it.
+
+    ``not_before`` makes the write a compare-and-set, decided inside the
+    transaction (``BEGIN IMMEDIATE`` holds the write lock, so no other
+    writer can slip in between the read and the write): when the stored
+    halt is readable and already at or after that instant, neither the row
+    nor the event is written, and the controls come back as they stand.
+    """
+    updated_at = _iso(_utc(now if now is not None else utcnow(), "now"))
+    with transaction(conn):
+        if not_before is not None:
+            current = _read_controls(conn)
+            in_force = current.halt_until
+            if not current.halt_unknown and in_force is not None and in_force >= not_before:
+                return current
+        conn.execute(
+            "INSERT INTO controls (key, value, updated_at) VALUES (?, ?, ?)"
+            " ON CONFLICT (key) DO UPDATE SET"
+            " value = excluded.value,"
+            " updated_at = excluded.updated_at",
+            (key, value, updated_at),
+        )
+        if event is not None:
+            _insert_event(conn, event)
+        stored = _read_controls(conn)
+    return stored
+
+
+def set_kill_switch(
+    conn: sqlite3.Connection,
+    on: bool,
+    *,
+    now: datetime | None = None,
+    event: Event | None = None,
+) -> Controls:
+    """Turn the kill switch on or off; returns the controls as read back.
+
+    ``now`` (default ``utcnow()``; naive taken as UTC) is recorded as the
+    row's ``updated_at``. ``event``, when given, is inserted in the same
+    transaction, so the change and its audit event land together or not at
+    all. ``on`` must be a real bool: the truthiness of anything else (the
+    string "off" is truthy) is not a decision this function will take.
+    """
+    try:
+        if not isinstance(on, bool):
+            raise TypeError(f"on must be a bool, not {type(on).__name__}")
+        return _write_control(conn, _KILL_SWITCH, _SWITCH_ON if on else _SWITCH_OFF, now, event)
+    except _REPO_ERRORS as exc:
+        raise StoreError("set kill switch", _KILL_SWITCH, exc) from exc
+
+
+def set_halt_until(
+    conn: sqlite3.Connection,
+    until: datetime | None,
+    *,
+    now: datetime | None = None,
+    event: Event | None = None,
+    only_extend: bool = False,
+) -> Controls:
+    """Halt trading until ``until``, or clear the halt with None; returns the
+    controls as read back.
+
+    ``until`` is stored as the ISO text of an aware UTC instant (naive taken
+    as UTC, any other offset converted); None is stored as ''. By default a
+    plain upsert: the operator may shorten or clear a halt. ``now`` and
+    ``event`` as in ``set_kill_switch``.
+
+    ``only_extend`` is how the policy engine writes: a halt is extended,
+    never shortened or re-announced. The stored halt is read inside the
+    same transaction as the write, and when it is already at or after
+    ``until`` nothing is written — not the row, not ``event`` — whatever
+    the caller's own snapshot of the controls said. No halt on record, an
+    earlier or expired one, and one that cannot be read are all replaced.
+    It needs an instant: ``only_extend`` with ``until=None`` is refused.
+    """
+    try:
+        if not isinstance(only_extend, bool):
+            raise TypeError(f"only_extend must be a bool, not {type(only_extend).__name__}")
+        if only_extend and until is None:
+            raise ValueError("only_extend needs an instant to extend the halt to, not None")
+        instant = None if until is None else _utc(until, "until")
+        value = "" if instant is None else instant.isoformat()
+        return _write_control(
+            conn, _HALT_UNTIL, value, now, event, not_before=instant if only_extend else None
+        )
+    except _REPO_ERRORS as exc:
+        raise StoreError("set halt until", _HALT_UNTIL, exc) from exc
 
 
 # --- reads ------------------------------------------------------------------
@@ -744,6 +908,179 @@ def get_recent_events(
         return [_row_to_event(row) for row in rows]
     except _REPO_ERRORS as exc:
         raise StoreError("get recent events", level.value if level else None, exc) from exc
+
+
+def _shown(value: object) -> str:
+    """A stored value as a ``problems`` line quotes it: its repr (so control
+    characters arrive escaped), cut to ``_SHOWN_MAX`` characters."""
+    text = repr(value)
+    return text if len(text) <= _SHOWN_MAX else text[: _SHOWN_MAX - 3] + "..."
+
+
+def _control_time(text: object) -> datetime | None:
+    """A ``controls`` timestamp as an aware UTC datetime; None when it will not parse.
+
+    Naive text is taken as UTC, like every timestamp in the store. Never
+    raises: the columns are TEXT NOT NULL in the migration, but a table
+    rebuilt by hand can hold anything.
+    """
+    if not isinstance(text, str):
+        return None
+    try:
+        return _utc(datetime.fromisoformat(text))
+    except (ValueError, OverflowError):
+        return None
+
+
+def _read_controls(conn: sqlite3.Connection) -> Controls:
+    """The ``controls`` rows as one ``Controls``. A bad row fails closed and
+    is explained in ``problems``; only SQLite itself raises (the table missing)."""
+    rows = conn.execute("SELECT key, value, updated_at FROM controls ORDER BY key").fetchall()
+    kill_rows = [row for row in rows if row["key"] == _KILL_SWITCH]
+    halt_rows = [row for row in rows if row["key"] == _HALT_UNTIL]
+    other_keys = sorted(
+        _shown(row["key"]) for row in rows if row["key"] not in (_KILL_SWITCH, _HALT_UNTIL)
+    )
+    problems: list[str] = []
+
+    kill_switch = True  # until one readable row says it is off
+    kill_updated_at: datetime | None = None
+    if len(kill_rows) != 1:
+        found = "is missing from" if not kill_rows else f"has {len(kill_rows)} rows in"
+        problems.append(f"kill_switch {found} the controls table: reading the kill switch as ON")
+    else:
+        value = kill_rows[0]["value"]
+        kill_updated_at = _control_time(kill_rows[0]["updated_at"])
+        if isinstance(value, str) and value in (_SWITCH_ON, _SWITCH_OFF):
+            kill_switch = value == _SWITCH_ON
+        else:
+            problems.append(
+                f"kill_switch value {_shown(value)} is neither 'on' nor 'off':"
+                " reading the kill switch as ON"
+            )
+
+    halt_until: datetime | None = None
+    halt_unknown = True  # until one readable row says there is no halt, or until when
+    halt_updated_at: datetime | None = None
+    if len(halt_rows) != 1:
+        found = "is missing from" if not halt_rows else f"has {len(halt_rows)} rows in"
+        problems.append(
+            f"halt_until {found} the controls table: cannot prove trading is not halted"
+        )
+    else:
+        value = halt_rows[0]["value"]
+        halt_updated_at = _control_time(halt_rows[0]["updated_at"])
+        if value == "":
+            halt_unknown = False
+        else:
+            halt_until = _control_time(value)
+            halt_unknown = halt_until is None
+            if halt_unknown:
+                problems.append(
+                    f"halt_until value {_shown(value)} is neither empty nor an ISO-8601"
+                    " timestamp: cannot prove trading is not halted"
+                )
+
+    # A row under any other key is a control this code cannot interpret (the
+    # key CHECK was bypassed, or newer code wrote it) — it may well be a stop.
+    for key in other_keys:
+        kill_switch = True
+        problems.append(f"unrecognised control key {key}: reading the kill switch as ON")
+
+    return Controls(
+        kill_switch=kill_switch,
+        halt_until=halt_until,
+        halt_unknown=halt_unknown,
+        kill_switch_updated_at=kill_updated_at,
+        halt_until_updated_at=halt_updated_at,
+        problems=tuple(problems),
+    )
+
+
+def get_controls(conn: sqlite3.Connection) -> Controls:
+    """The operator's control flags: the kill switch and the daily-loss halt.
+
+    Fails closed and never raises for a bad row — a gate that cannot read
+    its own stop flags must stay shut, not crash open:
+
+    - ``kill_switch`` row missing, duplicated, or neither 'on' nor 'off' →
+      ``kill_switch=True``;
+    - ``halt_until`` row missing, duplicated, or neither '' nor text
+      ``datetime.fromisoformat`` parses → ``halt_unknown=True`` and
+      ``halt_until=None`` ('' is "no halt": ``halt_until=None``,
+      ``halt_unknown=False``; a naive timestamp is taken as UTC);
+    - a row under any other key → ``kill_switch=True``.
+
+    Each finding is one line in ``problems``. None of them can happen to a
+    store written through this module: the migration seeds both rows,
+    CHECKs key and value, and refuses DELETE. ``*_updated_at`` is the row's
+    ``updated_at`` (None when that text will not parse — not a problem).
+
+    The table missing altogether — a database not migrated to 0003 — is a
+    StoreError: there is nothing to read, and ``db init`` fixes it.
+    """
+    try:
+        return _read_controls(conn)
+    except _REPO_ERRORS as exc:
+        raise StoreError("get controls", cause=exc) from exc
+
+
+def get_proposals_since(conn: sqlite3.Connection, since: datetime) -> list[Proposal]:
+    """Every proposal created at or after ``since`` (naive taken as UTC), newest first.
+
+    What the policy engine's duplicate rule looks through. The bound is
+    inclusive. Ties on ``created_at`` break on rowid, the later insert
+    first, as in ``get_recent_proposals``.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT * FROM proposals WHERE created_at >= ?"
+            " ORDER BY created_at DESC, rowid DESC",
+            (_iso(_utc(since, "since")),),
+        ).fetchall()
+        return [_row_to_proposal(row) for row in rows]
+    except _REPO_ERRORS as exc:
+        raise StoreError("get proposals since", str(since), exc) from exc
+
+
+def get_latest_undecided_proposal(conn: sqlite3.Connection) -> Proposal | None:
+    """The newest proposal with no row in ``policy_decisions``, or None.
+
+    Newest by ``created_at`` (then rowid). A proposal with any decision at
+    all — one or several, whatever the verdict — is decided and is skipped,
+    so an older undecided proposal can be the answer.
+    """
+    try:
+        row = conn.execute(
+            "SELECT * FROM proposals WHERE NOT EXISTS"
+            " (SELECT 1 FROM policy_decisions WHERE policy_decisions.proposal_id = proposals.id)"
+            " ORDER BY proposals.created_at DESC, proposals.rowid DESC LIMIT 1"
+        ).fetchone()
+        return _row_to_proposal(row) if row is not None else None
+    except _REPO_ERRORS as exc:
+        raise StoreError("get latest undecided proposal", cause=exc) from exc
+
+
+def count_orders_submitted_between(
+    conn: sqlite3.Connection, start: datetime, end: datetime
+) -> int:
+    """How many orders were sent to the broker in ``[start, end)`` (naive taken as UTC).
+
+    Counts by ``submitted_at`` — an order never submitted (NULL) is not a
+    trade — whatever became of it since (filled, cancelled, still open),
+    except ``failed``: an order the broker never accepted is not a trade
+    either. What the policy engine's daily trade cap measures against; the
+    caller supplies the bounds of its trading day.
+    """
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM orders"
+            " WHERE submitted_at >= ? AND submitted_at < ? AND status != ?",
+            (_iso(_utc(start, "start")), _iso(_utc(end, "end")), OrderStatus.FAILED.value),
+        ).fetchone()
+        return int(row[0])
+    except _REPO_ERRORS as exc:
+        raise StoreError("count orders submitted between", f"{start} .. {end}", exc) from exc
 
 
 def get_proposal_trace(conn: sqlite3.Connection, proposal_id: str) -> ProposalTrace:
