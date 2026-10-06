@@ -66,7 +66,7 @@ from aegis.store.repo import (
 )
 
 CLI_SOURCE = REPO_ROOT / "aegis" / "cli" / "policy.py"
-MIGRATIONS = ("0001_initial", "0002_reasoning_cycles_and_legs", "0003_controls")
+MIGRATIONS = ("0001_initial", "0002_reasoning_cycles_and_legs", "0003_controls", "0004_execution")
 
 RULE_LINE = re.compile(r"^  \[ ?(\d+)\] (\S+) {3,}(\S+) {3,}(.*)$")
 """One printed rule: ``  [ 4] daily_loss_limit   PASS   <detail>``."""
@@ -235,7 +235,8 @@ def loosen_controls(db_path, rows):
 
 
 def drop_migration_0003(db_path):
-    """Take a migrated store back to schema version 2: 0003 is pending again."""
+    """Take 0003 out of a migrated store: the controls table is gone and 0003 is pending
+    again (0004, which touches no part of 0003, stays applied)."""
     conn = sqlite3.connect(db_path)
     try:
         conn.execute("DROP TABLE controls")
@@ -1301,7 +1302,7 @@ class TestEvaluate:
 
     def test_recording_migrates_a_database_that_exists(self, store, capsys):
         drop_migration_0003(store)
-        assert versions_of(store) == {1: MIGRATIONS[0], 2: MIGRATIONS[1]}
+        assert versions_of(store) == {1: MIGRATIONS[0], 2: MIGRATIONS[1], 4: MIGRATIONS[3]}
         assert cli_policy.main(["evaluate", "prop-0001", "--db", str(store)],
                                context_builder=Builder()) == 0
         assert "verdict: AUTO_EXECUTE" in capsys.readouterr().out
@@ -1518,7 +1519,7 @@ class TestDryRun:
         )
         assert builder.calls == []
         assert every_row(store) == before and versions_of(store) == {
-            1: MIGRATIONS[0], 2: MIGRATIONS[1],
+            1: MIGRATIONS[0], 2: MIGRATIONS[1], 4: MIGRATIONS[3],
         }
 
     def test_an_unmigrated_file_is_refused_and_left_empty(self, db_path, capsys):

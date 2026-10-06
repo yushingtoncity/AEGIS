@@ -141,7 +141,7 @@ AEGIS takes is reconstructible after the fact.
   a 5 s busy timeout, so the future dashboard can read while the loop writes.
 - **Schema** lives in versioned SQL files under `aegis/store/migrations/`
   (`0001_initial.sql`, `0002_reasoning_cycles_and_legs.sql`,
-  `0003_controls.sql`, …). `open_store` applies pending migrations at startup inside one transaction per file and records each in
+  `0003_controls.sql`, `0004_execution.sql`, …). `open_store` applies pending migrations at startup inside one transaction per file and records each in
   `schema_version`; every statement is `IF NOT EXISTS`, so applying twice is
   a no-op, and a database written by newer code is refused rather than
   half-read. An applied file is never edited — schema changes are new files.
@@ -150,12 +150,15 @@ AEGIS takes is reconstructible after the fact.
   else). Writes: `insert_proposal`, `add_reasoning`, `record_decision`,
   `record_approval` (request, then answer, one row), `upsert_order`,
   `record_fill`, `snapshot_positions`, `snapshot_pnl`, `log_event`, and the
-  control flags `set_kill_switch` / `set_halt_until`. `record_decision` and
+  control flags `set_kill_switch` / `set_halt_until`, and for Phase 6
+  `claim_order` / `apply_broker_update` (see "Execution records" below).
+  `record_decision` and
   the two control writers take an optional `event`, written in the same
   transaction as the row it describes. Reads: `get_proposal`, `get_order`,
   `get_open_orders`, `get_daily_pnl`, `get_recent_events`, `get_controls`,
   `get_proposals_since`, `get_latest_undecided_proposal`,
-  `count_orders_submitted_between`, and `get_proposal_trace(proposal_id)`,
+  `count_orders_submitted_between`, `get_decision`, `get_decision_approval`,
+  `get_proposal_order`, `get_order_by_broker_id`, and `get_proposal_trace(proposal_id)`,
   which returns the whole lineage in one call. `client_order_id` is the idempotency key:
   `upsert_order` called twice with the same one yields exactly one row,
   keeping the original `id`. Failures surface as `StoreError` with the
@@ -171,10 +174,10 @@ AEGIS takes is reconstructible after the fact.
 | `proposals` | one structured trade proposal from the brain | `id`, `created_at`, `cycle_id`, `symbol`, `instrument`, `side`, `quantity`, `order_type`, `limit_price`, `thesis`, `confidence` (0–1), `invalidation`, `raw_model_output`, `model_name`, `prompt_version` |
 | `reasoning` | each agent stage of a brain cycle, linked to the proposal it led to (if any) | `cycle_id`, `proposal_id` → proposals (null until a proposal exists; a NO_TRADE cycle keeps its rows under the `cycle_id`), `stage` (scan / thesis / proposal), `created_at`, `content` (the model's raw output), `tokens_in`, `tokens_out`, `model_name` (the model that answered), `latency_ms` |
 | `proposal_legs` | the legs of a multi-leg option proposal | `proposal_id` → proposals, `leg_index`, `symbol` (OCC), `option_type`, `side`, `quantity`, `strike`, `expiration` |
-| `policy_decisions` | the deterministic gate's verdict | `proposal_id`, `decided_at`, `verdict` (REJECT / FLAG_ONLY / NEEDS_APPROVAL / AUTO_EXECUTE), `rules_evaluated` (JSON), `failing_rule`, `notes` |
-| `approvals` | human sign-off requests and responses | `proposal_id`, `requested_at`, `responded_at`, `response` (approved / rejected / expired), `channel`, `responder` |
-| `orders` | order state; one row per `client_order_id` | `proposal_id`, `client_order_id` UNIQUE, `broker` (paper / live), `broker_order_id`, `status` (proposed … filled / cancelled / failed), `submitted_at`, `updated_at`, `symbol`, `side`, `quantity`, `limit_price` |
-| `fills` | executions | `order_id` → orders, `filled_at`, `fill_price`, `fill_quantity`, `fees` |
+| `policy_decisions` | the deterministic gate's verdict | `proposal_id`, `decided_at`, `verdict` (REJECT / FLAG_ONLY / NEEDS_APPROVAL / AUTO_EXECUTE), `rules_evaluated` (JSON), `failing_rule`, `notes`, `purpose` (`evaluate`, or `pre_submit` for the re-check just before an order is sent) |
+| `approvals` | human sign-off requests and responses | `proposal_id`, `requested_at`, `responded_at`, `response` (approved / rejected / expired), `channel`, `responder`, `decision_id` → policy_decisions (one approval per decision), `expires_at`, `note` |
+| `orders` | order state; one row per `client_order_id` | `proposal_id`, `client_order_id` UNIQUE, `broker` (paper / live), `broker_order_id`, `status` (proposed … filled / cancelled / failed), `submitted_at`, `updated_at`, `symbol`, `side`, `quantity`, `limit_price`; since 0004: `decision_id`, `regate_decision_id`, `approval_id` (the authority behind the order), `instrument`, `order_type`, `time_in_force`, `position_intent`, `filled_quantity`, `avg_fill_price`, `broker_status`, `status_reason`, `last_synced_at` |
+| `fills` | executions | `order_id` → orders, `filled_at`, `fill_price`, `fill_quantity`, `fees`, `broker_fill_id` (UNIQUE when set) |
 | `position_snapshots` | positions as seen each cycle | `taken_at`, `symbol`, `quantity`, `avg_cost`, `market_value`, `unrealized_pnl` |
 | `pnl_snapshots` | account P&L each cycle | `taken_at`, `equity`, `cash`, `buying_power`, `daily_pnl`, `realized_pnl`, `unrealized_pnl` |
 | `events` | risk-limit trips, kill-switch toggles, heartbeats, errors | `occurred_at`, `level`, `kind`, `message`, `payload` (JSON) |
@@ -196,6 +199,47 @@ python -m aegis.cli.trace PROPOSAL_ID  # the full lineage, printed in full (--js
 All three take `--db PATH` to override the configured file. `trace` is
 read-only: it refuses a database with pending migrations rather than
 applying them as a side effect.
+
+### Execution records (Phase 6, store side)
+
+Migration `0004_execution.sql` gets the store ready for real paper orders.
+It only adds columns, indexes and triggers, so every row written before it
+reads and behaves as it did. An order written by Phase 6 is tied to the
+decision that authorised it (`decision_id`), to the `pre_submit`
+re-evaluation it passed just before it was sent (`regate_decision_id`), and
+to the human approval it rests on, if any (`approval_id`). Those orders are
+written and moved only by two functions:
+
+- `claim_order` is the last check and the first record, in one
+  `BEGIN IMMEDIATE` transaction. It re-reads the controls (the kill switch,
+  an active halt, or a halt it cannot read all refuse), checks the links
+  (an `evaluate` verdict of AUTO_EXECUTE or NEEDS_APPROVAL on this
+  proposal, a `pre_submit` decision on the same proposal, and for
+  NEEDS_APPROVAL an approved, unexpired approval of that exact decision),
+  and that the re-check still allows an order (an AUTO_EXECUTE order whose
+  re-check now asks for approval does not go), refuses a second order for
+  the same proposal, and counts today's orders against `max_daily_trades`. Then it inserts the row as `approved` with
+  `submitted_at` set, so the order counts toward the cap from that instant
+  even if the process dies before it is sent. A refusal raises
+  `ClaimRefused` with the reason and writes nothing.
+- `apply_broker_update` records what the broker says. The broker reports
+  cumulative figures, so each growth of the filled quantity becomes one
+  fill, priced so the fills add up to the broker's average, and named
+  `<broker_order_id>:<cumulative>` (the exact float), so replaying the
+  same update records nothing twice. Figures that do not add up (a
+  shrinking total, more than the order's quantity, no positive price for
+  the new fill, a failed order with anything filled) are refused.
+
+Triggers hold the same rules under any writer: a claimed order is born
+`approved`, its status only moves forward, a filled, cancelled or failed
+order is frozen, an order with anything filled never fails, the filled
+quantity only grows and never passes the quantity, what the order is and
+on whose authority never changes, the broker's id is set once, and the
+order and its fills are never rewritten or deleted. An approval tied to a
+decision sits on that decision's proposal and is answered once.
+`upsert_order` and `record_fill` keep working for rows written before
+Phase 6 and refuse the new ones. The design is in `docs/phase6/SPEC_PHASE6.md`; the executor
+and the CLI that use these come in the next two PRs.
 
 ## Agent brain (Phase 4)
 
@@ -621,6 +665,7 @@ aegis/
 tests/               config, cache, model-parsing, pricing, position, store, brain and policy tests (canned JSON, FakeLLM, hand-built contexts, tmp_path DBs)
 docs/phase5/         working documents of the policy-engine phase: spec, decisions, review rulings
 docs/phase5_1/       the Phase 5.1 follow-ups: what changed, why, and the evidence
+docs/phase6/         the Phase 6 spec: decisions, flow, and the 6a/6b/6c breakdown
 ```
 
 ## Roadmap

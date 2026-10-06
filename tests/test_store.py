@@ -107,6 +107,8 @@ from aegis.store.repo import (
 
 NAIVE = datetime(2026, 7, 30, 14, 0, 0)
 AWARE = NAIVE.replace(tzinfo=timezone.utc)
+LATEST = 4
+"""The newest migration: 0004_execution (Phase 6)."""
 
 
 @pytest.fixture
@@ -156,15 +158,23 @@ def _insert_proposal(conn, proposal, **overrides):
     )
 
 
+_LEGACY_ORDER_COLUMNS = (
+    "id", "proposal_id", "client_order_id", "broker", "broker_order_id", "status",
+    "submitted_at", "updated_at", "symbol", "side", "quantity", "limit_price",
+)
+"""The orders columns of migration 0001: what an order written before Phase 6 has."""
+
+
 def _insert_order(conn, order, **overrides):
-    """Insert an order row; ``overrides`` replace column values (to hit CHECKs)."""
+    """Insert an order row as Phase 3 wrote it (the 0001 columns; 0004's keep their defaults);
+    ``overrides`` replace column values (to hit CHECKs)."""
     row = dict(zip(order.model_dump(), _sql_values(order)))
     row.update(overrides)
     conn.execute(
         "INSERT INTO orders (id, proposal_id, client_order_id, broker, broker_order_id, status,"
         " submitted_at, updated_at, symbol, side, quantity, limit_price)"
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        tuple(row.values()),
+        tuple(row[column] for column in _LEGACY_ORDER_COLUMNS),
     )
 
 
@@ -267,9 +277,10 @@ def _control_rows(conn):
     return [tuple(row) for row in rows]
 
 
-def _triggers(conn):
+def _triggers(conn, table=None):
+    """Every trigger as ``(name, table)``, by name; only ``table``'s when given."""
     rows = conn.execute("SELECT name, tbl_name FROM sqlite_master WHERE type = 'trigger' ORDER BY name").fetchall()
-    return [tuple(row) for row in rows]
+    return [tuple(row) for row in rows if table is None or row[1] == table]
 
 
 def _traced(conn, call):
@@ -317,7 +328,7 @@ class TestConnect:
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
         assert conn.execute("PRAGMA synchronous").fetchone()[0] == 1  # NORMAL, the WAL pairing
-        assert schema_version(conn) == 3
+        assert schema_version(conn) == LATEST
         assert _table_names(conn) == set(TABLES) | {"schema_version"}
         assert len(TABLES) == 11 and TABLES[-1] == "controls"
         assert conn.row_factory is sqlite3.Row
@@ -333,7 +344,7 @@ class TestConnect:
         conn = connect(":memory:")
         assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "memory"
         assert conn.execute("PRAGMA synchronous").fetchone()[0] == 1  # NORMAL
-        assert migrate(conn) == 3
+        assert migrate(conn) == LATEST
         assert _table_names(conn) == set(TABLES) | {"schema_version"}
         conn.close()
 
@@ -403,7 +414,7 @@ class TestConnect:
         conn = connect(db_path)
         assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert [row[:3] for row in _schema_rows(conn)] == [  # migrated once
-            (1, 1, "0001_initial"), (2, 2, "0002_reasoning_cycles_and_legs"), (3, 3, "0003_controls"),
+            (1, 1, "0001_initial"), (2, 2, "0002_reasoning_cycles_and_legs"), (3, 3, "0003_controls"), (4, 4, "0004_execution"),
         ]
         assert _count(conn, "events") == 40
         conn.close()
@@ -452,6 +463,7 @@ class TestMigrations:
             (1, "0001_initial", "0001_initial.sql"),
             (2, "0002_reasoning_cycles_and_legs", "0002_reasoning_cycles_and_legs.sql"),
             (3, "0003_controls", "0003_controls.sql"),
+            (4, "0004_execution", "0004_execution.sql"),
         ]
         assert all(path.parent == MIGRATIONS_DIR for _, _, path in list_migrations())
 
@@ -483,18 +495,18 @@ class TestMigrations:
         assert statements[1].endswith("FROM reasoning AS r LEFT JOIN proposals AS p ON p.id = r.proposal_id;")
 
     def test_applying_twice_is_a_noop(self, conn, db_path):
-        assert migrate(conn) == 3
+        assert migrate(conn) == LATEST
         before = _schema_rows(conn)
-        assert len(before) == 3
-        assert migrate(conn) == 3
+        assert len(before) == LATEST
+        assert migrate(conn) == LATEST
         assert _schema_rows(conn) == before  # the same rows, byte for byte: nothing re-applied
         assert applied_versions(conn) == {
-            1: "0001_initial", 2: "0002_reasoning_cycles_and_legs", 3: "0003_controls",
+            1: "0001_initial", 2: "0002_reasoning_cycles_and_legs", 3: "0003_controls", 4: "0004_execution",
         }
         for (applied_at,) in conn.execute("SELECT applied_at FROM schema_version").fetchall():
             assert datetime.fromisoformat(applied_at).tzinfo is not None
         reopened = open_store(db_path)
-        assert schema_version(reopened) == 3
+        assert schema_version(reopened) == LATEST
         assert _schema_rows(reopened) == before
         reopened.close()
 
@@ -617,7 +629,7 @@ class TestMigrations:
     def test_dropped_table_is_reported_not_recreated(self, conn, db_path, capsys):
         """A recorded migration is never re-run: status and both CLIs say what is missing instead."""
         conn.execute("DROP TABLE events")
-        assert migrate(conn) == 3
+        assert migrate(conn) == LATEST
         assert "events" not in _table_names(conn)
         report = status(conn, db_path)
         assert report.pending_migrations == () and report.missing_tables == ("events",)
@@ -664,10 +676,10 @@ class TestMigrations:
                 ("x", "scan", AWARE.isoformat(), "c"),
             )
 
-        assert migrate(conn) == 3  # 0002, and 0003 after it
+        assert migrate(conn) == LATEST  # 0002, and 0003 and 0004 after it
         assert not conn.in_transaction
         assert applied_versions(conn) == {
-            1: "0001_initial", 2: "0002_reasoning_cycles_and_legs", 3: "0003_controls",
+            1: "0001_initial", 2: "0002_reasoning_cycles_and_legs", 3: "0003_controls", 4: "0004_execution",
         }
         assert _table_names(conn) == set(TABLES) | {"schema_version"}  # reasoning_v2 is gone, proposal_legs is there
         rows = conn.execute(
@@ -704,7 +716,7 @@ class TestMigrations:
             )
         insert_proposal(conn, _bare_proposal("prop-0003"), _legs("prop-0003"))
         assert _count(conn, "proposal_legs") == 2
-        assert status(conn, db_path).missing_tables == () and migrate(conn) == 3  # and nothing pending after
+        assert status(conn, db_path).missing_tables == () and migrate(conn) == LATEST  # and nothing pending after
         conn.close()
 
     def test_controls_file_leaves_transactions_to_db_py(self):
@@ -792,25 +804,26 @@ class TestMigrations:
         assert not conn.in_transaction
         assert schema_version(conn) == 2 and "controls" not in _table_names(conn) and _triggers(conn) == []
         monkeypatch.setattr(store_db, "MIGRATIONS_DIR", MIGRATIONS_DIR)  # the real file applies cleanly on top
-        assert migrate(conn) == 3
+        assert migrate(conn) == LATEST
         assert [row[:2] for row in _control_rows(conn)] == [("halt_until", ""), ("kill_switch", "off")]
-        assert _triggers(conn) == [("controls_keep_rows", "controls")]
+        assert _triggers(conn, "controls") == [("controls_keep_rows", "controls")]
         conn.close()
 
     def test_upgrading_a_v2_database_adds_controls_and_keeps_every_row(self, db_path, trace_data):
-        """0003 on a store with history: every existing row survives byte for byte, and the controls
-        arrive seeded — kill switch off, no halt — behind their no-delete trigger."""
+        """0003 (and 0004 on top) on a store with history: every existing value survives byte for
+        byte, and the controls arrive seeded — kill switch off, no halt — behind their no-delete
+        trigger. The history is written with the columns a version-2 store has."""
         conn = connect(db_path)
         conn.execute(store_db._SCHEMA_VERSION_DDL)
         for version, name, path in list_migrations()[:2]:
             store_db._apply_migration(conn, version, name, path)
         assert schema_version(conn) == 2 and "controls" not in _table_names(conn)
-        assert status(conn, db_path).pending_migrations == ("0003_controls",)
+        assert status(conn, db_path).pending_migrations == ("0003_controls", "0004_execution")
         with pytest.raises(StoreError, match="get controls") as info:  # nothing to read before 0003
             get_controls(conn)
         assert "no such table: controls" in str(info.value)
 
-        proposal, reasoning, decision, approval, order, fill = _seed_trace(conn, trace_data)
+        proposal, reasoning, decision, approval, order, fill = _seed_trace_legacy(conn, trace_data)
         cycle_only = add_reasoning(conn, Reasoning(
             id="reas-cycle-only", cycle_id="cycle-0009", stage=ReasoningStage.SCAN, content="c", created_at=AWARE,
         ))
@@ -821,15 +834,17 @@ class TestMigrations:
         before = _journal_rows(conn)
         assert all(before[table] for table in _ROWS_SQL)  # every pre-0003 table holds at least one row
         schema_before = _schema_rows(conn)
+        widths = _widths(conn)
 
-        assert migrate(conn) == 3
+        assert migrate(conn) == LATEST  # 0003, then 0004
         assert not conn.in_transaction
         assert applied_versions(conn) == {
-            1: "0001_initial", 2: "0002_reasoning_cycles_and_legs", 3: "0003_controls",
+            1: "0001_initial", 2: "0002_reasoning_cycles_and_legs", 3: "0003_controls", 4: "0004_execution",
         }
         assert _schema_rows(conn)[:2] == schema_before  # 0001 and 0002 were not re-applied
         assert _table_names(conn) == set(TABLES) | {"schema_version"}
-        assert _journal_rows(conn) == before
+        after = _journal_rows(conn)  # every old value as it was; 0004's columns come after them
+        assert {table: [row[: widths[table]] for row in rows] for table, rows in after.items()} == before
         trace = get_proposal_trace(conn, proposal.id)
         assert trace == ProposalTrace(
             proposal=proposal, reasoning=tuple(reasoning), decisions=(decision,),
@@ -845,7 +860,7 @@ class TestMigrations:
             seeded = datetime.fromisoformat(updated_at)
             assert seeded.utcoffset() == timedelta(0)
             assert abs(datetime.now(timezone.utc) - seeded) < timedelta(minutes=1)
-        assert _triggers(conn) == [("controls_keep_rows", "controls")]
+        assert _triggers(conn, "controls") == [("controls_keep_rows", "controls")]
         controls = get_controls(conn)
         assert (controls.kill_switch, controls.halt_until, controls.halt_unknown, controls.problems) == (
             False, None, False, (),
@@ -853,7 +868,7 @@ class TestMigrations:
         report = status(conn, db_path)
         assert report.pending_migrations == () and report.missing_tables == ()
         assert report.row_counts["controls"] == 2 and report.row_counts["proposals"] == 2
-        assert migrate(conn) == 3 and _control_rows(conn) == rows  # and nothing pending after
+        assert migrate(conn) == LATEST and _control_rows(conn) == rows  # and nothing pending after
         conn.close()
 
 
@@ -1011,19 +1026,27 @@ class TestSchemaConstraints:
             "policy_decisions": (PolicyDecision, [
                 ("id", "TEXT"), ("proposal_id", "TEXT"), ("decided_at", "TEXT"), ("verdict", "TEXT"),
                 ("rules_evaluated", "TEXT"), ("failing_rule", "TEXT"), ("notes", "TEXT"),
+                ("purpose", "TEXT"),  # 0004
             ]),
             "approvals": (Approval, [
                 ("id", "TEXT"), ("proposal_id", "TEXT"), ("requested_at", "TEXT"), ("responded_at", "TEXT"),
                 ("response", "TEXT"), ("channel", "TEXT"), ("responder", "TEXT"),
+                ("decision_id", "TEXT"), ("expires_at", "TEXT"), ("note", "TEXT"),  # 0004
             ]),
             "orders": (Order, [
                 ("id", "TEXT"), ("proposal_id", "TEXT"), ("client_order_id", "TEXT"), ("broker", "TEXT"),
                 ("broker_order_id", "TEXT"), ("status", "TEXT"), ("submitted_at", "TEXT"), ("updated_at", "TEXT"),
                 ("symbol", "TEXT"), ("side", "TEXT"), ("quantity", "REAL"), ("limit_price", "REAL"),
+                # 0004
+                ("decision_id", "TEXT"), ("regate_decision_id", "TEXT"), ("approval_id", "TEXT"),
+                ("instrument", "TEXT"), ("order_type", "TEXT"), ("time_in_force", "TEXT"),
+                ("position_intent", "TEXT"), ("filled_quantity", "REAL"), ("avg_fill_price", "REAL"),
+                ("broker_status", "TEXT"), ("status_reason", "TEXT"), ("last_synced_at", "TEXT"),
             ]),
             "fills": (Fill, [
                 ("id", "TEXT"), ("order_id", "TEXT"), ("filled_at", "TEXT"), ("fill_price", "REAL"),
                 ("fill_quantity", "REAL"), ("fees", "REAL"),
+                ("broker_fill_id", "TEXT"),  # 0004
             ]),
             "position_snapshots": (PositionSnapshot, [
                 ("id", "TEXT"), ("taken_at", "TEXT"), ("symbol", "TEXT"), ("quantity", "REAL"),
@@ -1072,12 +1095,14 @@ class TestSchemaConstraints:
                               " '2026-10-16')", ()),
             "reasoning": ("INSERT INTO reasoning VALUES (?, 'cycle-0001', 'prop-0001', 'scan', ?, 'c', NULL, NULL,"
                           " NULL, NULL)", (ts,)),
-            "policy_decisions": ("INSERT INTO policy_decisions VALUES (?, 'prop-0001', ?, 'REJECT', '[]', NULL, NULL)",
-                                 (ts,)),
-            "approvals": ("INSERT INTO approvals VALUES (?, 'prop-0001', ?, NULL, NULL, 'cli', NULL)", (ts,)),
+            "policy_decisions": ("INSERT INTO policy_decisions VALUES (?, 'prop-0001', ?, 'REJECT', '[]', NULL, NULL,"
+                                 " 'evaluate')", (ts,)),
+            "approvals": ("INSERT INTO approvals VALUES (?, 'prop-0001', ?, NULL, NULL, 'cli', NULL, NULL, NULL,"
+                          " NULL)", (ts,)),
             "orders": ("INSERT INTO orders VALUES (?, 'prop-0001', 'coid-x', 'paper', NULL, 'submitted', NULL, ?,"
-                       " 'SPY', 'buy', 1, NULL)", (ts,)),
-            "fills": ("INSERT INTO fills VALUES (?, 'ord-0001', ?, 1, 1, 0)", (ts,)),
+                       " 'SPY', 'buy', 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL,"
+                       " NULL)", (ts,)),
+            "fills": ("INSERT INTO fills VALUES (?, 'ord-0001', ?, 1, 1, 0, NULL)", (ts,)),
             "position_snapshots": ("INSERT INTO position_snapshots VALUES (?, ?, 'SPY', 1, NULL, NULL, NULL)", (ts,)),
             "pnl_snapshots": ("INSERT INTO pnl_snapshots VALUES (?, ?, 1, 2, 3, 4, 5, 6)", (ts,)),
             "events": ("INSERT INTO events VALUES (?, ?, 'info', 'k', 'm', NULL)", (ts,)),
@@ -1323,10 +1348,10 @@ class TestModels:
     def test_store_status_model(self):
         report = StoreStatus(
             path="x.db", exists=True, schema_version=3, journal_mode="wal",
-            applied_migrations=("0001_initial", "0002_reasoning_cycles_and_legs", "0003_controls"),
+            applied_migrations=("0001_initial", "0002_reasoning_cycles_and_legs", "0003_controls", "0004_execution"),
             pending_migrations=(), row_counts={table: 0 for table in TABLES},
         )
-        assert report.applied_migrations == ("0001_initial", "0002_reasoning_cycles_and_legs", "0003_controls")
+        assert report.applied_migrations == ("0001_initial", "0002_reasoning_cycles_and_legs", "0003_controls", "0004_execution")
         assert set(report.row_counts) == set(TABLES) and len(report.row_counts) == 11
 
 
@@ -1372,8 +1397,8 @@ class TestStatus:
     def test_after_open_store(self, conn, db_path):
         report = status(conn, db_path)
         assert report == StoreStatus(
-            path=str(db_path), exists=True, schema_version=3, journal_mode="wal",
-            applied_migrations=("0001_initial", "0002_reasoning_cycles_and_legs", "0003_controls"),
+            path=str(db_path), exists=True, schema_version=LATEST, journal_mode="wal",
+            applied_migrations=("0001_initial", "0002_reasoning_cycles_and_legs", "0003_controls", "0004_execution"),
             pending_migrations=(), row_counts=_FRESH_COUNTS,  # the two seeded control rows, nothing else
         )
         assert list(report.row_counts) == list(TABLES)
@@ -1387,7 +1412,7 @@ class TestStatus:
         report = status(conn, db_path)
         assert report.exists is True and report.schema_version == 0
         assert report.applied_migrations == ()
-        assert report.pending_migrations == ("0001_initial", "0002_reasoning_cycles_and_legs", "0003_controls")
+        assert report.pending_migrations == ("0001_initial", "0002_reasoning_cycles_and_legs", "0003_controls", "0004_execution")
         assert report.row_counts == {table: 0 for table in TABLES}
         assert report.missing_tables == ()  # not created yet is not the same as dropped
         conn.close()
@@ -1413,13 +1438,52 @@ class TestStatus:
         conn = connect(":memory:")
         migrate(conn)
         report = status(conn, ":memory:")
-        assert report.exists is True and report.journal_mode == "memory" and report.schema_version == 3
+        assert report.exists is True and report.journal_mode == "memory" and report.schema_version == LATEST
         conn.close()
 
 
 def test_db_files_and_wal_sidecars_are_gitignored():
     lines = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert {"*.db", "*.db-wal", "*.db-shm"} <= set(lines)
+
+
+def _seed_trace_legacy(conn, trace_data):
+    """``_seed_trace`` for a store from before 0004, where the repository's decision,
+    approval, order and fill writers (which write 0004's columns) cannot run: the
+    same records, written with the columns the older schema has. Returns them as
+    a migrated store reads them back."""
+    proposal = insert_proposal(conn, Proposal.model_validate(trace_data["proposal"]))
+    reasoning = [add_reasoning(conn, Reasoning.model_validate(r)) for r in trace_data["reasoning"]]
+    decision = PolicyDecision.model_validate(trace_data["decision"])
+    conn.execute(
+        "INSERT INTO policy_decisions (id, proposal_id, decided_at, verdict, rules_evaluated, failing_rule, notes)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (decision.id, decision.proposal_id, decision.decided_at.isoformat(), decision.verdict.value,
+         json.dumps(decision.rules_evaluated), decision.failing_rule, decision.notes),
+    )
+    approval = Approval.model_validate(trace_data["approval"])
+    conn.execute(
+        "INSERT INTO approvals (id, proposal_id, requested_at, responded_at, response, channel, responder)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (approval.id, approval.proposal_id, approval.requested_at.isoformat(),
+         approval.responded_at.isoformat() if approval.responded_at else None,
+         approval.response.value if approval.response else None, approval.channel, approval.responder),
+    )
+    order = Order.model_validate(trace_data["order"])
+    _insert_order(conn, order)
+    fill = Fill.model_validate(trace_data["fill"])
+    conn.execute(
+        "INSERT INTO fills (id, order_id, filled_at, fill_price, fill_quantity, fees) VALUES (?, ?, ?, ?, ?, ?)",
+        (fill.id, fill.order_id, fill.filled_at.isoformat(), fill.fill_price, fill.fill_quantity, fill.fees),
+    )
+    return proposal, reasoning, decision, approval, order, fill
+
+
+def _widths(conn):
+    """Each journal table's column count, to compare rows across a migration that adds columns."""
+    return {
+        table: len(conn.execute("SELECT name FROM pragma_table_info(?)", (table,)).fetchall()) for table in _ROWS_SQL
+    }
 
 
 def _seed_trace(conn, trace_data):
@@ -2327,7 +2391,7 @@ class TestControls:
             ("key", "TEXT", 1, 1), ("value", "TEXT", 1, 0), ("updated_at", "TEXT", 1, 0),
         ]
         assert [row[:2] for row in _control_rows(conn)] == [("halt_until", ""), ("kill_switch", "off")]
-        assert _triggers(conn) == [("controls_keep_rows", "controls")]
+        assert _triggers(conn, "controls") == [("controls_keep_rows", "controls")]
         assert list(Controls.model_fields) == [
             "kill_switch", "halt_until", "halt_unknown", "kill_switch_updated_at", "halt_until_updated_at", "problems",
         ]
@@ -2405,7 +2469,7 @@ class TestControls:
             for statement in store_db._split_statements(script):
                 conn.execute(statement)
         assert _control_rows(conn) == before  # value and updated_at, both rows
-        assert _triggers(conn) == [("controls_keep_rows", "controls")]
+        assert _triggers(conn, "controls") == [("controls_keep_rows", "controls")]
         controls = get_controls(conn)
         assert controls.kill_switch is True and controls.halt_until == halt and controls.problems == ()
 
@@ -2914,7 +2978,7 @@ class TestControls:
             assert not conn.in_transaction
         report = status(conn, db_path)
         assert report.missing_tables == ("controls",) and report.row_counts["controls"] == 0
-        assert migrate(conn) == 3 and "controls" not in _table_names(conn)  # a recorded migration is never re-run
+        assert migrate(conn) == LATEST and "controls" not in _table_names(conn)  # a recorded migration is never re-run
 
     def test_lock_timeout_names_the_control(self, db_path):
         holder = open_store(db_path)
@@ -2999,18 +3063,18 @@ class TestCli:
         assert db_path.exists()
         assert str(db_path) in out and "(created)" in out
         assert "journal mode: wal" in out
-        assert "schema version 3 (applied: 0001_initial, 0002_reasoning_cycles_and_legs, 0003_controls)" in out
+        assert "schema version 4 (applied: 0001_initial, 0002_reasoning_cycles_and_legs, 0003_controls, 0004_execution)" in out
         assert "up to date" not in out
 
         assert cli_db.main(["init", "--db", str(db_path)]) == 0
         out = capsys.readouterr().out
         assert "(created)" not in out and "wal" in out
         assert (
-            "schema version 3 (applied: 0001_initial, 0002_reasoning_cycles_and_legs, 0003_controls) [up to date]"
+            "schema version 4 (applied: 0001_initial, 0002_reasoning_cycles_and_legs, 0003_controls, 0004_execution) [up to date]"
         ) in out
         conn = connect(db_path)
-        assert conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 3
-        assert schema_version(conn) == 3
+        assert conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == LATEST
+        assert schema_version(conn) == LATEST
         conn.close()
 
     def test_db_status_missing_file_exits_1_without_creating_it(self, tmp_path, capsys):
@@ -3028,7 +3092,7 @@ class TestCli:
         out = capsys.readouterr().out
         assert str(db_path) in out and "exists: yes" in out
         assert "journal mode: wal" in out
-        assert "schema version 3 (applied: 0001_initial, 0002_reasoning_cycles_and_legs, 0003_controls)" in out
+        assert "schema version 4 (applied: 0001_initial, 0002_reasoning_cycles_and_legs, 0003_controls, 0004_execution)" in out
         assert "pending migrations: none" in out
         counts = dict(re.findall(r"^  (\w+)\s+(\d+)$", out, re.MULTILINE))
         assert list(counts) == list(TABLES) and len(counts) == 11  # every table, in TABLES order, controls last
@@ -3042,7 +3106,7 @@ class TestCli:
         assert cli_db.main(["status", "--db", str(db_path)]) == 0
         out = capsys.readouterr().out
         assert "schema version 0 (applied: none)" in out
-        assert "pending migrations: 0001_initial, 0002_reasoning_cycles_and_legs, 0003_controls" in out
+        assert "pending migrations: 0001_initial, 0002_reasoning_cycles_and_legs, 0003_controls, 0004_execution" in out
         assert re.search(r"^  events\s+0$", out, re.MULTILINE)
         assert re.search(r"^  proposal_legs\s+0$", out, re.MULTILINE)
         assert re.search(r"^  controls\s+0$", out, re.MULTILINE)  # not created yet: no seed rows either
@@ -3252,7 +3316,7 @@ class TestCli:
         assert cli_db.main(["init", "--db", ":memory:"]) == 0
         out = capsys.readouterr().out
         assert "database: :memory:" in out and "journal mode: memory" in out
-        assert "schema version 3 (applied: 0001_initial, 0002_reasoning_cycles_and_legs, 0003_controls)" in out
+        assert "schema version 4 (applied: 0001_initial, 0002_reasoning_cycles_and_legs, 0003_controls, 0004_execution)" in out
         assert cli_db.main(["status", "--db", ":memory:"]) == 1
         assert "exists: no" in capsys.readouterr().out
         assert cli_trace.main(["prop-0001", "--db", ":memory:"]) == 1
@@ -3287,23 +3351,23 @@ class TestCli:
         captured = capsys.readouterr()
         assert captured.out == ""
         assert captured.err.startswith("trace failed: ")
-        assert "pending migrations (0001_initial, 0002_reasoning_cycles_and_legs, 0003_controls)" in captured.err
+        assert "pending migrations (0001_initial, 0002_reasoning_cycles_and_legs, 0003_controls, 0004_execution)" in captured.err
         assert "aegis.cli.db init" in captured.err and captured.err.count("\n") == 1
         conn = connect(db_path)
         assert schema_version(conn) == 0 and _table_names(conn) == set()
         # a database one migration behind this code is refused the same way
-        assert migrate(conn) == 3
+        assert migrate(conn) == LATEST
         migrations = tmp_path / "migrations"
         migrations.mkdir()
         for _, _, real in list_migrations():
             (migrations / real.name).write_text(real.read_text(encoding="utf-8"), encoding="utf-8")
-        (migrations / "0004_extra.sql").write_text(
+        (migrations / "0005_extra.sql").write_text(
             "CREATE TABLE IF NOT EXISTS extra (id TEXT PRIMARY KEY NOT NULL);\n", encoding="utf-8"
         )
         monkeypatch.setattr(store_db, "MIGRATIONS_DIR", migrations)
         assert cli_trace.main(["prop-0001", "--db", str(db_path)]) == 1
-        assert "pending migrations (0004_extra)" in capsys.readouterr().err
-        assert schema_version(conn) == 3 and "extra" not in _table_names(conn)
+        assert "pending migrations (0005_extra)" in capsys.readouterr().err
+        assert schema_version(conn) == LATEST and "extra" not in _table_names(conn)
         conn.close()
 
     def test_trace_prints_non_ascii_content_under_an_ascii_stdout(self, db_path, conn, trace_data, monkeypatch):
