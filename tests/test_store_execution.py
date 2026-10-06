@@ -24,6 +24,7 @@ from aegis.store.models import (
     DecisionPurpose,
     Event,
     EventLevel,
+    Fill,
     Instrument,
     Order,
     OrderSide,
@@ -48,6 +49,7 @@ from aegis.store.repo import (
     insert_proposal,
     record_approval,
     record_decision,
+    record_fill,
     set_halt_until,
     set_kill_switch,
     upsert_order,
@@ -255,11 +257,16 @@ class TestMigration:
         assert [tuple(row) for row in rows] == [
             ("approvals_answer_once", "approvals"),
             ("approvals_decision_link_fixed", "approvals"),
+            ("approvals_decision_same_proposal", "approvals"),
+            ("fills_execution_fixed", "fills"),
+            ("fills_execution_kept", "fills"),
             ("fills_execution_price_positive", "fills"),
             ("orders_decision_link_fixed", "orders"),
             ("orders_execution_born_approved", "orders"),
+            ("orders_execution_failed_unfilled", "orders"),
             ("orders_execution_filled_quantity", "orders"),
             ("orders_execution_identity_fixed", "orders"),
+            ("orders_execution_kept", "orders"),
             ("orders_execution_status_forward", "orders"),
             ("orders_execution_terminal_frozen", "orders"),
         ]
@@ -308,6 +315,7 @@ class TestClaim:
             ("expires now", "has expired"),
             ("no expiry", "has no expiry"),
             ("other decision", "is not the approval of decision"),
+            ("earlier decision, same proposal", "is not the approval of decision"),
             ("missing", "does not exist"),
         ],
     )
@@ -330,6 +338,11 @@ class TestClaim:
         elif setup == "other decision":
             other, _ = _seed(conn, "prop-0002", verdict=Verdict.NEEDS_APPROVAL)
             approval_id = _approve(conn, other, "prop-0002").id
+        elif setup == "earlier decision, same proposal":
+            earlier = record_decision(
+                conn, _decision("prop-0001", "dec-earlier", Verdict.NEEDS_APPROVAL, minutes_ago=5)
+            )
+            approval_id = _approve(conn, earlier.id).id
         elif setup == "missing":
             approval_id = "appr-nowhere"
         assert expected in _refused(conn, _order(approval_id=approval_id))
@@ -387,6 +400,59 @@ class TestClaim:
     def test_a_cap_of_zero_admits_nothing(self, conn):
         _seed(conn)
         assert "at or above the cap of 0" in _refused(conn, cap=0)
+
+    @pytest.mark.parametrize(
+        ("now", "start", "end"),
+        [
+            (NOW, DAY_END, DAY_START),  # swapped: the count would always be 0
+            (NOW + timedelta(days=1), DAY_START, DAY_END),  # the claim lands outside the window
+            (DAY_START - timedelta(seconds=1), DAY_START, DAY_END),
+            (DAY_END, DAY_START, DAY_END),  # half-open
+        ],
+    )
+    def test_a_window_without_the_claim_in_it_is_a_caller_bug(self, conn, now, start, end):
+        # Found in review: an inconsistent window counted nothing, so the cap admitted everything.
+        _seed(conn)
+        before = _counts(conn)
+        with pytest.raises(StoreError, match="must contain now") as info:
+            claim_order(conn, _order(), now=now, day_start=start, day_end=end, max_daily_trades=1)
+        assert not isinstance(info.value, ClaimRefused)
+        assert _counts(conn) == before
+        assert _claim(conn, now=DAY_START).status is OrderStatus.APPROVED  # the start is inside
+
+    @pytest.mark.parametrize(
+        ("verdict", "recheck", "expected"),
+        [
+            (Verdict.AUTO_EXECUTE, Verdict.REJECT, "re-check pre-2 is REJECT"),
+            (Verdict.AUTO_EXECUTE, Verdict.FLAG_ONLY, "re-check pre-2 is FLAG_ONLY"),
+            (Verdict.AUTO_EXECUTE, Verdict.NEEDS_APPROVAL, "no longer goes without approval"),
+            (Verdict.NEEDS_APPROVAL, Verdict.REJECT, "re-check pre-2 is REJECT"),
+            (Verdict.NEEDS_APPROVAL, Verdict.FLAG_ONLY, "re-check pre-2 is FLAG_ONLY"),
+        ],
+    )
+    def test_the_pre_submit_re_check_must_still_allow_the_order(self, conn, verdict, recheck, expected):
+        decision_id, _ = _seed(conn, verdict=verdict)
+        record_decision(conn, _decision("prop-0001", "pre-2", recheck, DecisionPurpose.PRE_SUBMIT, 0))
+        approval_id = _approve(conn, decision_id).id if verdict is Verdict.NEEDS_APPROVAL else None
+        assert expected in _refused(conn, _order(regate_decision_id="pre-2", approval_id=approval_id))
+
+    @pytest.mark.parametrize("recheck", [Verdict.AUTO_EXECUTE, Verdict.NEEDS_APPROVAL])
+    def test_an_approved_order_passes_a_re_check_that_allows_it(self, conn, recheck):
+        decision_id, _ = _seed(conn, verdict=Verdict.NEEDS_APPROVAL)
+        record_decision(conn, _decision("prop-0001", "pre-2", recheck, DecisionPurpose.PRE_SUBMIT, 0))
+        approval = _approve(conn, decision_id)
+        stored = _claim(conn, _order(regate_decision_id="pre-2", approval_id=approval.id))
+        assert stored.regate_decision_id == "pre-2"
+
+    def test_an_approval_filed_under_another_proposal_authorises_nothing(self, conn):
+        decision_id, _ = _seed(conn, verdict=Verdict.NEEDS_APPROVAL)
+        _seed(conn, "prop-0002", verdict=Verdict.NEEDS_APPROVAL)
+        with pytest.raises(StoreError, match="answers a decision on its own proposal"):
+            _approve(conn, decision_id, "prop-0002")
+        # and were such a row there anyway, the claim would not rest on it
+        conn.execute("DROP TRIGGER approvals_decision_same_proposal")
+        stray = _approve(conn, decision_id, "prop-0002")
+        assert "is not the approval of decision" in _refused(conn, _order(approval_id=stray.id))
 
     def test_one_order_per_proposal_ever(self, conn):
         _seed(conn)
@@ -497,7 +563,7 @@ class TestBrokerUpdate:
             conn, OrderStatus.PARTIALLY_FILLED, at=2, filled_quantity=3.0, avg_fill_price=200.0,
             broker_status="partially_filled",
         )
-        assert (fill.fill_quantity, fill.fill_price, fill.broker_fill_id) == (3.0, 200.0, "b-1:3")
+        assert (fill.fill_quantity, fill.fill_price, fill.broker_fill_id) == (3.0, 200.0, "b-1:3.0")
         assert order.filled_quantity == 3.0 and order.avg_fill_price == 200.0
         order, fill = _update(
             conn, OrderStatus.FILLED, at=3, filled_quantity=10.0, avg_fill_price=200.7,
@@ -505,7 +571,7 @@ class TestBrokerUpdate:
         )
         # the second fill is priced so the fills add up to the broker's average: (2007 - 600) / 7
         assert fill.fill_quantity == 7.0 and fill.fill_price == pytest.approx(201.0)
-        assert fill.broker_fill_id == "b-1:10" and order.status is OrderStatus.FILLED
+        assert fill.broker_fill_id == "b-1:10.0" and order.status is OrderStatus.FILLED
         total = sum(q * p for q, p, _ in _fills(conn))
         assert total == pytest.approx(10.0 * 200.7)
         # a replayed sync records nothing twice and writes nothing
@@ -538,7 +604,7 @@ class TestBrokerUpdate:
         _update(conn, OrderStatus.PARTIALLY_FILLED, at=2, filled_quantity=4.0, avg_fill_price=5.0)
         order, fill = _update(conn, OrderStatus.CANCELLED, at=3, avg_fill_price=1.0)
         assert fill is None and order.avg_fill_price == 5.0
-        assert _fills(conn) == [(4.0, 5.0, "b-1:4")]
+        assert _fills(conn) == [(4.0, 5.0, "b-1:4.0")]
 
     @pytest.mark.parametrize(
         ("kwargs", "message"),
@@ -588,18 +654,53 @@ class TestBrokerUpdate:
         _update(conn, OrderStatus.PARTIALLY_FILLED, at=3, filled_quantity=1.0, avg_fill_price=1.0)
         with pytest.raises(StoreError, match="only moves forward"):
             _update(conn, OrderStatus.SUBMITTED, at=4)
-        with pytest.raises(StoreError, match="only moves forward"):
-            _update(conn, OrderStatus.FAILED, at=4)  # part of it filled: it did not fail
+        with pytest.raises(StoreError, match="filled in part did not fail"):
+            _update(conn, OrderStatus.FAILED, at=4)
+
+    @pytest.mark.parametrize("first", [OrderStatus.APPROVED, OrderStatus.SUBMITTED])
+    def test_an_order_with_anything_filled_never_fails(self, conn, first):
+        # Found in review: from approved or submitted, a failed status would
+        # have kept the fills and dropped the order from the daily trade cap.
+        _claimed(conn)
+        if first is OrderStatus.SUBMITTED:
+            _update(conn, first, broker_order_id="b-1", filled_quantity=4.0, avg_fill_price=200.0)
+        before = (get_order(conn, "aegis-prop-0001"), _fills(conn))
+        with pytest.raises(StoreError, match="filled in part did not fail"):
+            _update(conn, OrderStatus.FAILED, at=2, broker_order_id="b-1", filled_quantity=4.0,
+                    avg_fill_price=200.0)
+        assert (get_order(conn, "aegis-prop-0001"), _fills(conn)) == before
+        with pytest.raises(sqlite3.IntegrityError, match="anything filled never fails"):
+            _raw(conn, "UPDATE orders SET status = 'failed', filled_quantity = 4"
+                       " WHERE client_order_id = 'aegis-prop-0001'")
+
+    def test_an_order_with_nothing_filled_may_fail(self, conn):
+        _claimed(conn)
+        failed, _ = _update(conn, OrderStatus.FAILED, status_reason="rejected: insufficient buying power")
+        assert failed.status is OrderStatus.FAILED and failed.filled_quantity == 0
+
+    def test_a_fill_id_is_exact_however_close_the_totals(self, conn):
+        # Found in review: with .10g, 12.123456788 and 12.123456789 shared a
+        # name and the final fill could never be recorded.
+        _claimed(conn, quantity=12.123456789)
+        _update(conn, OrderStatus.PARTIALLY_FILLED, broker_order_id="b-1", filled_quantity=12.123456788,
+                avg_fill_price=10.0)
+        order, fill = _update(conn, OrderStatus.FILLED, at=2, filled_quantity=12.123456789,
+                              avg_fill_price=10.0)
+        assert order.status is OrderStatus.FILLED and fill.broker_fill_id == "b-1:12.123456789"
+        assert [row[2] for row in _fills(conn)] == ["b-1:12.123456788", "b-1:12.123456789"]
 
     @pytest.mark.parametrize("terminal", sorted(TERMINAL_ORDER_STATUSES, key=lambda s: s.value))
     def test_a_terminal_order_is_frozen_but_a_replay_is_a_no_op(self, conn, terminal):
         _claimed(conn)
         filled = {"filled_quantity": 10.0, "avg_fill_price": 2.0} if terminal is OrderStatus.FILLED else {}
         order, _ = _update(conn, terminal, broker_order_id="b-1", **filled)
-        assert _update(conn, terminal, at=5, **filled) == (order, None)
-        with pytest.raises(StoreError, match="never changes"):
-            _update(conn, terminal, at=6, broker_status="something new", status_reason="late news",
-                    broker_order_id="b-2")
+        event = Event(level=EventLevel.CRITICAL, kind="k", message="m", occurred_at=NOW)
+        assert _update(conn, terminal, at=5, event=event, **filled) == (order, None)
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 0  # a replay writes nothing
+        for change in ({"broker_status": "something new"}, {"status_reason": "late news"}):
+            with pytest.raises(StoreError, match="a filled, cancelled or failed order never changes"):
+                _update(conn, terminal, at=6, **change, **filled)
+        assert get_order(conn, "aegis-prop-0001") == order
 
     def test_the_broker_id_is_set_once(self, conn):
         _claimed(conn)
@@ -634,6 +735,16 @@ class TestBrokerUpdate:
             upsert_order(conn, bare)
         assert get_order(conn, claimed.client_order_id) == claimed
 
+    def test_record_fill_refuses_execution_era_orders(self, conn):
+        claimed = _claimed(conn)
+        fill = Fill(order_id=claimed.id, filled_at=NOW, fill_price=200.0, fill_quantity=3.0)
+        with pytest.raises(StoreError, match="written by apply_broker_update only"):
+            record_fill(conn, fill)
+        assert _fills(conn) == []
+        legacy = upsert_order(conn, _legacy_order(proposal_id="prop-0001"))
+        record_fill(conn, fill.model_copy(update={"order_id": legacy.id}))  # as before
+        assert len(_fills(conn)) == 1
+
 
 # --- reads ----------------------------------------------------------------------
 
@@ -656,6 +767,13 @@ class TestReads:
     def test_no_order_reads_none(self, conn):
         assert get_proposal_order(conn, "prop-0001") is None
         assert get_order_by_broker_id(conn, "b-1") is None
+
+    def test_the_broker_id_lookup_finds_the_claimed_order_not_a_legacy_one(self, conn):
+        _seed(conn)
+        upsert_order(conn, _legacy_order(broker_order_id="b-1"))  # written first
+        claimed = _claim(conn)
+        _update(conn, OrderStatus.SUBMITTED, broker_order_id="b-1")
+        assert get_order_by_broker_id(conn, "b-1").id == claimed.id
 
 
 # --- the triggers, under any writer ---------------------------------------------
@@ -715,6 +833,26 @@ class TestTriggers:
             _raw(conn, "INSERT INTO fills (id, order_id, filled_at, fill_price, fill_quantity, fees)"
                        " VALUES ('f', ?, ?, 0, 1, 0)", claimed.id, NOW.isoformat())
 
+    def test_a_claimed_order_and_its_fills_are_never_deleted_or_rewritten(self, conn):
+        claimed = _claimed(conn)
+        _update(conn, OrderStatus.PARTIALLY_FILLED, broker_order_id="b-1", filled_quantity=4.0,
+                avg_fill_price=5.0)
+        _update(conn, OrderStatus.CANCELLED, at=2)
+        for sql, message in (
+            ("UPDATE fills SET fill_price = 6 WHERE order_id = ?", "fill of a claimed order never changes"),
+            ("UPDATE fills SET fill_quantity = 1 WHERE order_id = ?", "fill of a claimed order never changes"),
+            ("DELETE FROM fills WHERE order_id = ?", "fill of a claimed order never changes"),
+            ("DELETE FROM orders WHERE id = ?", "a claimed order is never deleted"),
+        ):
+            with pytest.raises(sqlite3.IntegrityError, match=message):
+                _raw(conn, sql, claimed.id)
+        assert _fills(conn) == [(4.0, 5.0, "b-1:4.0")]
+        # rows written before Phase 6 can still be removed as before
+        legacy = upsert_order(conn, _legacy_order(proposal_id="prop-0001"))
+        record_fill(conn, Fill(order_id=legacy.id, filled_at=NOW, fill_price=1.0, fill_quantity=1.0))
+        _raw(conn, "DELETE FROM fills WHERE order_id = ?", legacy.id)
+        _raw(conn, "DELETE FROM orders WHERE id = ?", legacy.id)
+
     def test_a_broker_fill_id_names_one_fill(self, conn):
         claimed = _claimed(conn)
         sql = ("INSERT INTO fills (id, order_id, filled_at, fill_price, fill_quantity, fees, broker_fill_id)"
@@ -736,8 +874,9 @@ class TestTriggers:
         for sql in (
             "UPDATE approvals SET decision_id = NULL WHERE id = ?",
             "UPDATE approvals SET expires_at = '2099-01-01T00:00:00+00:00' WHERE id = ?",
+            "UPDATE approvals SET proposal_id = 'prop-0002' WHERE id = ?",
         ):
-            with pytest.raises(sqlite3.IntegrityError, match="decision and expiry never change"):
+            with pytest.raises(sqlite3.IntegrityError, match="decision, proposal and expiry never change"):
                 _raw(conn, sql, approval.id)
         # the same answer recorded again is not a change
         assert record_approval(conn, approval) == approval

@@ -120,6 +120,24 @@ BEGIN
     SELECT RAISE(ABORT, 'an order''s filled quantity only grows, and never past its quantity');
 END;
 
+-- Failed means nothing was traded (a failed order does not count toward
+-- the daily trade cap), so an order with anything filled never fails.
+CREATE TRIGGER IF NOT EXISTS orders_execution_failed_unfilled
+    BEFORE UPDATE ON orders
+    WHEN OLD.decision_id IS NOT NULL AND NEW.status = 'failed' AND NEW.filled_quantity > 0
+BEGIN
+    SELECT RAISE(ABORT, 'an order with anything filled never fails');
+END;
+
+-- A claimed order is never deleted: it is the record of a trade (and of
+-- the proposal's one order, and of a slot in the daily trade cap).
+CREATE TRIGGER IF NOT EXISTS orders_execution_kept
+    BEFORE DELETE ON orders
+    WHEN OLD.decision_id IS NOT NULL
+BEGIN
+    SELECT RAISE(ABORT, 'a claimed order is never deleted');
+END;
+
 -- What the order is, and on whose authority, never changes once claimed;
 -- the broker's id is recorded at most once.
 CREATE TRIGGER IF NOT EXISTS orders_execution_identity_fixed
@@ -160,6 +178,22 @@ BEGIN
     SELECT RAISE(ABORT, 'a fill of a claimed order has a positive price');
 END;
 
+-- A claimed order's fills add up to its filled quantity: they are only
+-- ever added, never changed or removed.
+CREATE TRIGGER IF NOT EXISTS fills_execution_fixed
+    BEFORE UPDATE ON fills
+    WHEN (SELECT decision_id FROM orders WHERE id = OLD.order_id) IS NOT NULL
+BEGIN
+    SELECT RAISE(ABORT, 'a fill of a claimed order never changes and is never deleted');
+END;
+
+CREATE TRIGGER IF NOT EXISTS fills_execution_kept
+    BEFORE DELETE ON fills
+    WHEN (SELECT decision_id FROM orders WHERE id = OLD.order_id) IS NOT NULL
+BEGIN
+    SELECT RAISE(ABORT, 'a fill of a claimed order never changes and is never deleted');
+END;
+
 -- --- approvals -------------------------------------------------------------
 
 -- A human answer to one decision, valid until expires_at.
@@ -170,12 +204,24 @@ ALTER TABLE approvals ADD COLUMN note TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_approvals_decision_id
     ON approvals (decision_id) WHERE decision_id IS NOT NULL;
 
+-- An approval answers a decision on its own proposal, so the proposal's
+-- trace shows every approval an order of that proposal rests on.
+CREATE TRIGGER IF NOT EXISTS approvals_decision_same_proposal
+    BEFORE INSERT ON approvals
+    WHEN NEW.decision_id IS NOT NULL
+     AND (SELECT proposal_id FROM policy_decisions WHERE id = NEW.decision_id)
+         IS NOT NEW.proposal_id
+BEGIN
+    SELECT RAISE(ABORT, 'an approval answers a decision on its own proposal');
+END;
+
 CREATE TRIGGER IF NOT EXISTS approvals_decision_link_fixed
     BEFORE UPDATE ON approvals
     WHEN NEW.decision_id IS NOT OLD.decision_id
-      OR (OLD.decision_id IS NOT NULL AND NEW.expires_at IS NOT OLD.expires_at)
+      OR (OLD.decision_id IS NOT NULL
+          AND (NEW.expires_at IS NOT OLD.expires_at OR NEW.proposal_id IS NOT OLD.proposal_id))
 BEGIN
-    SELECT RAISE(ABORT, 'an approval''s decision and expiry never change');
+    SELECT RAISE(ABORT, 'an approval''s decision, proposal and expiry never change');
 END;
 
 -- Once a decision's approval is answered, the answer is final.

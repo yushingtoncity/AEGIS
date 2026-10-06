@@ -606,9 +606,22 @@ def upsert_order(conn: sqlite3.Connection, order: Order) -> Order:
 
 
 def record_fill(conn: sqlite3.Connection, fill: Fill) -> Fill:
-    """Record one execution of an order (which must exist)."""
+    """Record one execution of an order (which must exist).
+
+    For orders as Phase 3 defined them. The fills of an execution-era order
+    (one with a ``decision_id``) are written by ``apply_broker_update`` only,
+    so they always add up to the order's filled quantity; such an order is
+    refused here.
+    """
     try:
         with transaction(conn):
+            owner = conn.execute(
+                "SELECT decision_id FROM orders WHERE id = ?", (fill.order_id,)
+            ).fetchone()
+            if owner is not None and owner["decision_id"] is not None:
+                raise ValueError(
+                    "the order is execution-era: its fills are written by apply_broker_update only"
+                )
             conn.execute(
                 "INSERT INTO fills (id, order_id, filled_at, fill_price, fill_quantity, fees,"
                 " broker_fill_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -837,10 +850,13 @@ def _claim_refusal(conn: sqlite3.Connection, order: Order, now: datetime) -> str
 
     Read inside the claim's transaction. The decision must be a verdict
     (``evaluate``) on this proposal that may lead to an order; the
-    ``pre_submit`` decision a re-evaluation of the same proposal; and a
-    NEEDS_APPROVAL verdict needs the approval of that very decision,
+    ``pre_submit`` decision a re-evaluation of the same proposal that still
+    allows one (AUTO_EXECUTE or NEEDS_APPROVAL); and a NEEDS_APPROVAL
+    verdict needs the approval of that very decision, on this proposal,
     answered ``approved`` and not expired at ``now``. An AUTO_EXECUTE verdict
-    rests on no approval.
+    rests on no approval, so its re-check must be AUTO_EXECUTE too. Whether
+    an approved order's re-check escalates only on what the human saw is
+    the dispatcher's call (spec D3), not the store's.
     """
     decision = _decision_row(conn, order.decision_id)
     if decision is None:
@@ -859,7 +875,15 @@ def _claim_refusal(conn: sqlite3.Connection, order: Order, now: datetime) -> str
         return f"pre_submit decision {order.regate_decision_id} is on another proposal"
     if regate["purpose"] != DecisionPurpose.PRE_SUBMIT.value:
         return f"decision {order.regate_decision_id} is not a pre_submit decision"
+    recheck = Verdict(regate["verdict"])
+    if recheck not in _CLAIMABLE_VERDICTS:
+        return f"the pre_submit re-check {order.regate_decision_id} is {recheck.value}"
     if verdict is Verdict.AUTO_EXECUTE:
+        if recheck is not Verdict.AUTO_EXECUTE:
+            return (
+                f"the pre_submit re-check {order.regate_decision_id} is {recheck.value}:"
+                " the order no longer goes without approval"
+            )
         if order.approval_id is not None:
             return "an AUTO_EXECUTE order rests on no approval"
         return None
@@ -870,7 +894,7 @@ def _claim_refusal(conn: sqlite3.Connection, order: Order, now: datetime) -> str
     ).fetchone()
     if approval is None:
         return f"approval {order.approval_id} does not exist"
-    if approval["decision_id"] != order.decision_id:
+    if approval["decision_id"] != order.decision_id or approval["proposal_id"] != order.proposal_id:
         return f"approval {order.approval_id} is not the approval of decision {order.decision_id}"
     if approval["response"] != ApprovalResponse.APPROVED.value:
         return f"approval {order.approval_id} is {approval['response'] or 'unanswered'}"
@@ -902,7 +926,8 @@ def claim_order(
     2. the order's links must authorise it (``_claim_refusal``);
     3. the proposal has no execution-era order yet (at most one, ever);
     4. the orders submitted in ``[day_start, day_end)`` (naive taken as
-       UTC), failed ones aside, must be fewer than ``max_daily_trades``;
+       UTC; the window must contain ``now``), failed ones aside, must be
+       fewer than ``max_daily_trades``;
     5. the row is inserted ``approved``, with ``submitted_at`` and
        ``updated_at`` set to ``now``, so it counts toward the cap from this
        instant whatever happens next; and ``event``, when given, with it.
@@ -918,6 +943,10 @@ def claim_order(
             raise TypeError("max_daily_trades must be an int")
         instant = _utc(now, "now")
         start, end = _utc(day_start, "day_start"), _utc(day_end, "day_end")
+        # A window that does not hold the claim would count nothing, and a
+        # cap that counts nothing admits everything: a caller bug, refused.
+        if not start <= instant < end:
+            raise ValueError("the trading day [day_start, day_end) must contain now")
         with transaction(conn):
             controls = _read_controls(conn)
             if controls.kill_switch:
@@ -999,8 +1028,9 @@ def claim_order(
 def _fill_id(broker_order_id: str, cumulative: float) -> str:
     """The broker fill id of the execution that took an order to ``cumulative``
     filled: the same order and cumulative quantity always give the same id,
-    so replaying a sync records nothing twice."""
-    return f"{broker_order_id}:{cumulative:.10g}"
+    so replaying a sync records nothing twice. ``repr`` is exact: two
+    different totals never share a name, however close."""
+    return f"{broker_order_id}:{cumulative!r}"
 
 
 def apply_broker_update(
@@ -1035,9 +1065,13 @@ def apply_broker_update(
 
     ``broker_order_id`` is recorded the first time it is given and must not
     change after. ``status`` follows the forward-only rule of migration
-    0004, which refuses anything else. An update to a terminal order that
-    changes nothing is a no-op (a replayed sync); one that changes anything
-    is refused. ``status_reason`` (None: as stored) says why, in words.
+    0004, which refuses anything else, and an order with anything filled
+    never becomes ``failed`` (failed means nothing was traded, and a failed
+    order does not count toward the daily trade cap). An update to a
+    terminal order that changes nothing is a no-op (a replayed sync) and
+    writes nothing, ``event`` included; one that changes anything is
+    refused. ``status_reason`` and ``broker_status`` (None: as stored) say
+    why, in words.
     """
     try:
         if not isinstance(status, OrderStatus):
@@ -1058,8 +1092,14 @@ def apply_broker_update(
                 status is current.status
                 and total == current.filled_quantity
                 and broker_id == current.broker_order_id
+                and broker_status in (None, current.broker_status)
+                and status_reason in (None, current.status_reason)
             ):
                 return current, None
+            if status is OrderStatus.FAILED and total > 0:
+                raise ValueError(
+                    f"failed with {total:.10g} filled: an order that filled in part did not fail"
+                )
             if status is OrderStatus.FILLED and total != current.quantity:
                 raise ValueError(
                     f"filled with {total:.10g} of {current.quantity:.10g}: a filled order is"
@@ -1152,10 +1192,16 @@ def _new_fill(
 
 
 def get_order_by_broker_id(conn: sqlite3.Connection, broker_order_id: str) -> Order | None:
-    """The order the broker knows as ``broker_order_id``, or None."""
+    """The execution-era order the broker knows as ``broker_order_id``, or None.
+
+    Only orders written through ``claim_order`` are looked up: among them the
+    id is unique (migration 0004), while rows written before Phase 6 may
+    share one.
+    """
     try:
         row = conn.execute(
-            "SELECT * FROM orders WHERE broker_order_id = ?", (broker_order_id,)
+            "SELECT * FROM orders WHERE broker_order_id = ? AND decision_id IS NOT NULL",
+            (broker_order_id,),
         ).fetchone()
         return _row_to_order(row) if row is not None else None
     except _REPO_ERRORS as exc:

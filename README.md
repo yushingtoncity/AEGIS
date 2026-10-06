@@ -216,25 +216,29 @@ written and moved only by two functions:
   (an `evaluate` verdict of AUTO_EXECUTE or NEEDS_APPROVAL on this
   proposal, a `pre_submit` decision on the same proposal, and for
   NEEDS_APPROVAL an approved, unexpired approval of that exact decision),
-  refuses a second order for the same proposal, and counts today's orders
-  against `max_daily_trades`. Then it inserts the row as `approved` with
+  and that the re-check still allows an order (an AUTO_EXECUTE order whose
+  re-check now asks for approval does not go), refuses a second order for
+  the same proposal, and counts today's orders against `max_daily_trades`. Then it inserts the row as `approved` with
   `submitted_at` set, so the order counts toward the cap from that instant
   even if the process dies before it is sent. A refusal raises
   `ClaimRefused` with the reason and writes nothing.
 - `apply_broker_update` records what the broker says. The broker reports
   cumulative figures, so each growth of the filled quantity becomes one
   fill, priced so the fills add up to the broker's average, and named
-  `<broker_order_id>:<cumulative>`, so replaying the same update records
-  nothing twice. Figures that do not add up (a shrinking total, more than
-  the order's quantity, no positive price for the new fill) are refused.
+  `<broker_order_id>:<cumulative>` (the exact float), so replaying the
+  same update records nothing twice. Figures that do not add up (a
+  shrinking total, more than the order's quantity, no positive price for
+  the new fill, a failed order with anything filled) are refused.
 
 Triggers hold the same rules under any writer: a claimed order is born
 `approved`, its status only moves forward, a filled, cancelled or failed
-order is frozen, the filled quantity only grows and never passes the
-quantity, what the order is and on whose authority never changes, and the
-broker's id is set once. An approval tied to a decision is answered once.
-`upsert_order` keeps working for rows written before Phase 6 and refuses
-the new ones. The design is in `docs/phase6/SPEC_PHASE6.md`; the executor
+order is frozen, an order with anything filled never fails, the filled
+quantity only grows and never passes the quantity, what the order is and
+on whose authority never changes, the broker's id is set once, and the
+order and its fills are never rewritten or deleted. An approval tied to a
+decision sits on that decision's proposal and is answered once.
+`upsert_order` and `record_fill` keep working for rows written before
+Phase 6 and refuse the new ones. The design is in `docs/phase6/SPEC_PHASE6.md`; the executor
 and the CLI that use these come in the next two PRs.
 
 ## Agent brain (Phase 4)

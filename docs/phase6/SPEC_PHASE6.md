@@ -89,15 +89,22 @@ Migration `0004_execution.sql`: ADD COLUMN, indexes and triggers only. The
   - `filled_quantity` never decreases and never exceeds `quantity`;
   - the order's identity (proposal, decision links, client id, broker,
     instrument, symbol, side, quantity, limit price, type, time in force,
-    intent) never changes, and `broker_order_id` is set at most once.
-  - An approval's answer is written once; its decision link never changes.
+    intent) never changes, and `broker_order_id` is set at most once;
+  - an order with anything filled never becomes `failed` (a failed order
+    does not count toward the daily cap);
+  - a claimed order is never deleted, and its fills are never changed or
+    deleted.
+  - An approval's answer is written once; its decision link, proposal and
+    expiry never change; it answers a decision on its own proposal.
   - A fill's price is positive.
 
 Repository: `claim_order`, `apply_broker_update`, `get_order_by_broker_id`,
 `get_proposal_order`, `get_decision`, `get_decision_approval`. The existing
-`upsert_order` refuses execution-era rows (they change only through
-`claim_order` and `apply_broker_update`); its behaviour on legacy rows is
-unchanged. `record_decision` writes `purpose`; `record_approval` writes the
+`upsert_order` and `record_fill` refuse execution-era rows (they change
+only through `claim_order` and `apply_broker_update`); their behaviour on
+legacy rows is unchanged. `claim_order` also refuses a pre_submit re-check
+of REJECT or FLAG_ONLY, and an AUTO_EXECUTE order whose re-check now
+needs approval. `record_decision` writes `purpose`; `record_approval` writes the
 new approval columns.
 
 ### 6b: the execution package
