@@ -53,6 +53,7 @@ and never parsed.
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from collections.abc import Sequence
 from datetime import date, datetime, time, timedelta, timezone
@@ -60,13 +61,15 @@ from typing import Any
 
 from aegis.data.models import OptionType, utcnow
 from aegis.store.db import transaction
-from aegis.store.errors import StoreError
+from aegis.store.errors import ClaimRefused, StoreError
 from aegis.store.models import (
     OPEN_ORDER_STATUSES,
+    TERMINAL_ORDER_STATUSES,
     Approval,
     ApprovalResponse,
     Broker,
     Controls,
+    DecisionPurpose,
     Event,
     EventLevel,
     Fill,
@@ -75,6 +78,7 @@ from aegis.store.models import (
     OrderSide,
     OrderStatus,
     OrderType,
+    PositionIntent,
     PnlSnapshot,
     PolicyDecision,
     PositionSnapshot,
@@ -83,6 +87,7 @@ from aegis.store.models import (
     ProposalTrace,
     Reasoning,
     ReasoningStage,
+    TimeInForce,
     TokenUsage,
     Verdict,
 )
@@ -218,6 +223,7 @@ def _row_to_decision(row: sqlite3.Row) -> PolicyDecision:
         rules_evaluated=_from_json(row["rules_evaluated"]),
         failing_rule=row["failing_rule"],
         notes=row["notes"],
+        purpose=DecisionPurpose(row["purpose"]),
     )
 
 
@@ -231,7 +237,14 @@ def _row_to_approval(row: sqlite3.Row) -> Approval:
         response=ApprovalResponse(response) if response is not None else None,
         channel=row["channel"],
         responder=row["responder"],
+        decision_id=row["decision_id"],
+        expires_at=_from_iso(row["expires_at"]),
+        note=row["note"],
     )
+
+
+def _enum_or_none(enum: type, value: Any) -> Any:
+    return enum(value) if value is not None else None
 
 
 def _row_to_order(row: sqlite3.Row) -> Order:
@@ -248,6 +261,18 @@ def _row_to_order(row: sqlite3.Row) -> Order:
         side=OrderSide(row["side"]),
         quantity=row["quantity"],
         limit_price=row["limit_price"],
+        decision_id=row["decision_id"],
+        regate_decision_id=row["regate_decision_id"],
+        approval_id=row["approval_id"],
+        instrument=_enum_or_none(Instrument, row["instrument"]),
+        order_type=_enum_or_none(OrderType, row["order_type"]),
+        time_in_force=_enum_or_none(TimeInForce, row["time_in_force"]),
+        position_intent=_enum_or_none(PositionIntent, row["position_intent"]),
+        filled_quantity=row["filled_quantity"],
+        avg_fill_price=row["avg_fill_price"],
+        broker_status=row["broker_status"],
+        status_reason=row["status_reason"],
+        last_synced_at=_from_iso(row["last_synced_at"]),
     )
 
 
@@ -259,6 +284,7 @@ def _row_to_fill(row: sqlite3.Row) -> Fill:
         fill_price=row["fill_price"],
         fill_quantity=row["fill_quantity"],
         fees=row["fees"],
+        broker_fill_id=row["broker_fill_id"],
     )
 
 
@@ -450,7 +476,7 @@ def record_decision(
         with transaction(conn):
             conn.execute(
                 "INSERT INTO policy_decisions (id, proposal_id, decided_at, verdict,"
-                " rules_evaluated, failing_rule, notes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                " rules_evaluated, failing_rule, notes, purpose) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     decision.id,
                     decision.proposal_id,
@@ -459,6 +485,7 @@ def record_decision(
                     _json(decision.rules_evaluated),
                     decision.failing_rule,
                     decision.notes,
+                    decision.purpose.value,
                 ),
             )
             if event is not None:
@@ -472,19 +499,26 @@ def record_approval(conn: sqlite3.Connection, approval: Approval) -> Approval:
     """Insert an approval request, or fill in the response of one already recorded.
 
     Call it when the request goes out and again, with the same id, once it is
-    answered: the second call updates only ``responded_at``, ``response`` and
-    ``responder`` — the request itself (proposal, requested_at, channel) is
+    answered: the second call updates only ``responded_at``, ``response``,
+    ``responder`` and ``note`` — the request itself (proposal, requested_at,
+    channel, and since Phase 6 its ``decision_id`` and ``expires_at``) is
     immutable. Exactly one row per approval id. Returns the row as stored.
+
+    An approval tied to a decision (``decision_id``) is answered once:
+    migration 0004 refuses to change an answer already recorded, and allows
+    one approval per decision.
     """
     try:
         with transaction(conn):
             conn.execute(
                 "INSERT INTO approvals (id, proposal_id, requested_at, responded_at, response,"
-                " channel, responder) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                " channel, responder, decision_id, expires_at, note)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT (id) DO UPDATE SET"
                 " responded_at = excluded.responded_at,"
                 " response = excluded.response,"
-                " responder = excluded.responder",
+                " responder = excluded.responder,"
+                " note = excluded.note",
                 (
                     approval.id,
                     approval.proposal_id,
@@ -493,6 +527,9 @@ def record_approval(conn: sqlite3.Connection, approval: Approval) -> Approval:
                     approval.response.value if approval.response is not None else None,
                     approval.channel,
                     approval.responder,
+                    approval.decision_id,
+                    _iso(approval.expires_at),
+                    approval.note,
                 ),
             )
             row = conn.execute("SELECT * FROM approvals WHERE id = ?", (approval.id,)).fetchone()
@@ -513,9 +550,26 @@ def upsert_order(conn: sqlite3.Connection, order: Order) -> Order:
     the row as stored, so it keeps the ORIGINAL ``id``, ``proposal_id``,
     ``broker``, ``symbol`` and ``side`` of the first insert — not the ones on
     the argument.
+
+    It writes orders as Phase 3 defined them, and nothing else. An
+    execution-era order (one with a ``decision_id``, written by
+    ``claim_order``) is refused, both as the argument and as the row the
+    ``client_order_id`` already names: those change only through
+    ``claim_order`` and ``apply_broker_update``. The Phase 6 columns of an
+    argument are not written.
     """
     try:
+        if _execution_links(order):
+            raise ValueError("an order with decision links is written by claim_order only")
         with transaction(conn):
+            existing = conn.execute(
+                "SELECT decision_id FROM orders WHERE client_order_id = ?",
+                (order.client_order_id,),
+            ).fetchone()
+            if existing is not None and existing["decision_id"] is not None:
+                raise ValueError(
+                    "the order is execution-era: it changes through apply_broker_update only"
+                )
             conn.execute(
                 "INSERT INTO orders (id, proposal_id, client_order_id, broker, broker_order_id,"
                 " status, submitted_at, updated_at, symbol, side, quantity, limit_price)"
@@ -556,8 +610,8 @@ def record_fill(conn: sqlite3.Connection, fill: Fill) -> Fill:
     try:
         with transaction(conn):
             conn.execute(
-                "INSERT INTO fills (id, order_id, filled_at, fill_price, fill_quantity, fees)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO fills (id, order_id, filled_at, fill_price, fill_quantity, fees,"
+                " broker_fill_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     fill.id,
                     fill.order_id,
@@ -565,6 +619,7 @@ def record_fill(conn: sqlite3.Connection, fill: Fill) -> Fill:
                     fill.fill_price,
                     fill.fill_quantity,
                     fill.fees,
+                    fill.broker_fill_id,
                 ),
             )
     except _REPO_ERRORS as exc:
@@ -735,6 +790,408 @@ def set_halt_until(
         )
     except _REPO_ERRORS as exc:
         raise StoreError("set halt until", _HALT_UNTIL, exc) from exc
+
+
+# --- execution (Phase 6) ----------------------------------------------------
+#
+# An execution-era order is born in claim_order and moved on only by
+# apply_broker_update; migration 0004's triggers hold the same rules under
+# both (status only forward, terminal rows frozen, filled quantity only
+# growing, identity fixed). See docs/phase6/SPEC_PHASE6.md.
+
+_CLAIMABLE_VERDICTS = (Verdict.AUTO_EXECUTE, Verdict.NEEDS_APPROVAL)
+
+
+def _execution_links(order: Order) -> bool:
+    return any(
+        link is not None for link in (order.decision_id, order.regate_decision_id, order.approval_id)
+    )
+
+
+def _check_claimable(order: Order) -> None:
+    """What ``claim_order`` needs of its argument; a caller bug is a ValueError."""
+    if order.decision_id is None or order.regate_decision_id is None:
+        raise ValueError("a claimed order names its decision and its pre_submit decision")
+    if order.status is not OrderStatus.APPROVED:
+        raise ValueError(f"a claimed order is born approved, not {order.status.value}")
+    if order.broker_order_id is not None or order.filled_quantity != 0:
+        raise ValueError("a claimed order has no broker id and nothing filled yet")
+    if order.instrument is None or order.order_type is not OrderType.LIMIT:
+        raise ValueError("a claimed order names its instrument and is a limit order")
+    if order.time_in_force is None:
+        raise ValueError("a claimed order names its time in force")
+    if order.limit_price is None or not order.limit_price > 0:
+        raise ValueError("a claimed limit order has a positive limit price")
+    if (order.instrument is Instrument.OPTION) != (order.position_intent is not None):
+        raise ValueError("an option order names its position intent, and an equity order none")
+
+
+def _decision_row(conn: sqlite3.Connection, decision_id: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM policy_decisions WHERE id = ?", (decision_id,)
+    ).fetchone()
+
+
+def _claim_refusal(conn: sqlite3.Connection, order: Order, now: datetime) -> str | None:
+    """Why the order's own links do not authorise it, in words; None when they do.
+
+    Read inside the claim's transaction. The decision must be a verdict
+    (``evaluate``) on this proposal that may lead to an order; the
+    ``pre_submit`` decision a re-evaluation of the same proposal; and a
+    NEEDS_APPROVAL verdict needs the approval of that very decision,
+    answered ``approved`` and not expired at ``now``. An AUTO_EXECUTE verdict
+    rests on no approval.
+    """
+    decision = _decision_row(conn, order.decision_id)
+    if decision is None:
+        return f"decision {order.decision_id} does not exist"
+    if decision["proposal_id"] != order.proposal_id:
+        return f"decision {order.decision_id} is not a decision on proposal {order.proposal_id}"
+    if decision["purpose"] != DecisionPurpose.EVALUATE.value:
+        return f"decision {order.decision_id} is a {decision['purpose']} decision, not a verdict"
+    verdict = Verdict(decision["verdict"])
+    if verdict not in _CLAIMABLE_VERDICTS:
+        return f"decision {order.decision_id} is {verdict.value}: no order may follow it"
+    regate = _decision_row(conn, order.regate_decision_id)
+    if regate is None:
+        return f"pre_submit decision {order.regate_decision_id} does not exist"
+    if regate["proposal_id"] != order.proposal_id:
+        return f"pre_submit decision {order.regate_decision_id} is on another proposal"
+    if regate["purpose"] != DecisionPurpose.PRE_SUBMIT.value:
+        return f"decision {order.regate_decision_id} is not a pre_submit decision"
+    if verdict is Verdict.AUTO_EXECUTE:
+        if order.approval_id is not None:
+            return "an AUTO_EXECUTE order rests on no approval"
+        return None
+    if order.approval_id is None:
+        return f"decision {order.decision_id} needs approval, and the order names none"
+    approval = conn.execute(
+        "SELECT * FROM approvals WHERE id = ?", (order.approval_id,)
+    ).fetchone()
+    if approval is None:
+        return f"approval {order.approval_id} does not exist"
+    if approval["decision_id"] != order.decision_id:
+        return f"approval {order.approval_id} is not the approval of decision {order.decision_id}"
+    if approval["response"] != ApprovalResponse.APPROVED.value:
+        return f"approval {order.approval_id} is {approval['response'] or 'unanswered'}"
+    expires_at = _from_iso(approval["expires_at"])
+    if expires_at is None:
+        return f"approval {order.approval_id} has no expiry"
+    if not now < expires_at:
+        return f"approval {order.approval_id} has expired"
+    return None
+
+
+def claim_order(
+    conn: sqlite3.Connection,
+    order: Order,
+    *,
+    now: datetime,
+    day_start: datetime,
+    day_end: datetime,
+    max_daily_trades: int,
+    event: Event | None = None,
+) -> Order:
+    """Claim one order before it is sent: the last check and the first record, in one transaction.
+
+    Inside one ``BEGIN IMMEDIATE`` (so no other writer moves in between):
+
+    1. the controls, read fresh, must be clear: the kill switch off, no halt
+       in force at ``now``, and the halt readable (an unreadable one cannot
+       prove trading is not halted);
+    2. the order's links must authorise it (``_claim_refusal``);
+    3. the proposal has no execution-era order yet (at most one, ever);
+    4. the orders submitted in ``[day_start, day_end)`` (naive taken as
+       UTC), failed ones aside, must be fewer than ``max_daily_trades``;
+    5. the row is inserted ``approved``, with ``submitted_at`` and
+       ``updated_at`` set to ``now``, so it counts toward the cap from this
+       instant whatever happens next; and ``event``, when given, with it.
+
+    Any of 1-4 failing raises ``ClaimRefused`` with the reason and writes
+    nothing. A malformed argument (no decision links, a market order, a
+    status other than approved, ...) is a caller bug: ``StoreError``.
+    Returns the row as stored.
+    """
+    try:
+        _check_claimable(order)
+        if isinstance(max_daily_trades, bool) or not isinstance(max_daily_trades, int):
+            raise TypeError("max_daily_trades must be an int")
+        instant = _utc(now, "now")
+        start, end = _utc(day_start, "day_start"), _utc(day_end, "day_end")
+        with transaction(conn):
+            controls = _read_controls(conn)
+            if controls.kill_switch:
+                raise ClaimRefused(order.client_order_id, "the kill switch is on")
+            if controls.halt_unknown:
+                raise ClaimRefused(order.client_order_id, "cannot prove trading is not halted")
+            if controls.halt_until is not None and controls.halt_until > instant:
+                raise ClaimRefused(
+                    order.client_order_id,
+                    f"trading is halted until {controls.halt_until.isoformat()}",
+                )
+            why_not = _claim_refusal(conn, order, instant)
+            if why_not is not None:
+                raise ClaimRefused(order.client_order_id, why_not)
+            existing = conn.execute(
+                "SELECT client_order_id FROM orders WHERE proposal_id = ? AND decision_id IS NOT NULL",
+                (order.proposal_id,),
+            ).fetchone()
+            if existing is not None:
+                raise ClaimRefused(
+                    order.client_order_id,
+                    f"proposal {order.proposal_id} already has order {existing['client_order_id']}",
+                )
+            # The rule count_orders_submitted_between counts by: an order claimed
+            # but not yet acknowledged counts (the claim sets submitted_at), a
+            # definite rejection (failed) does not.
+            sent = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM orders"
+                    " WHERE submitted_at >= ? AND submitted_at < ? AND status != ?",
+                    (_iso(start), _iso(end), OrderStatus.FAILED.value),
+                ).fetchone()[0]
+            )
+            if sent >= max_daily_trades:
+                raise ClaimRefused(
+                    order.client_order_id,
+                    f"{sent} orders sent today: at or above the cap of {max_daily_trades}",
+                )
+            conn.execute(
+                "INSERT INTO orders (id, proposal_id, client_order_id, broker, broker_order_id,"
+                " status, submitted_at, updated_at, symbol, side, quantity, limit_price,"
+                " decision_id, regate_decision_id, approval_id, instrument, order_type,"
+                " time_in_force, position_intent, filled_quantity, avg_fill_price,"
+                " broker_status, status_reason, last_synced_at)"
+                " VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL,"
+                " NULL, NULL, NULL)",
+                (
+                    order.id,
+                    order.proposal_id,
+                    order.client_order_id,
+                    order.broker.value,
+                    OrderStatus.APPROVED.value,
+                    _iso(instant),
+                    _iso(instant),
+                    order.symbol,
+                    order.side.value,
+                    order.quantity,
+                    order.limit_price,
+                    order.decision_id,
+                    order.regate_decision_id,
+                    order.approval_id,
+                    order.instrument.value,
+                    order.order_type.value,
+                    order.time_in_force.value,
+                    order.position_intent.value if order.position_intent is not None else None,
+                ),
+            )
+            if event is not None:
+                _insert_event(conn, event)
+            row = conn.execute(
+                "SELECT * FROM orders WHERE client_order_id = ?", (order.client_order_id,)
+            ).fetchone()
+            stored = _row_to_order(row)
+    except _REPO_ERRORS as exc:
+        raise StoreError("claim order", order.client_order_id, exc) from exc
+    return stored
+
+
+def _fill_id(broker_order_id: str, cumulative: float) -> str:
+    """The broker fill id of the execution that took an order to ``cumulative``
+    filled: the same order and cumulative quantity always give the same id,
+    so replaying a sync records nothing twice."""
+    return f"{broker_order_id}:{cumulative:.10g}"
+
+
+def apply_broker_update(
+    conn: sqlite3.Connection,
+    client_order_id: str,
+    *,
+    status: OrderStatus,
+    synced_at: datetime,
+    broker_order_id: str | None = None,
+    broker_status: str | None = None,
+    filled_quantity: float | None = None,
+    avg_fill_price: float | None = None,
+    status_reason: str | None = None,
+    event: Event | None = None,
+) -> tuple[Order, Fill | None]:
+    """Record what the broker says about an execution-era order; returns the
+    order as stored and the fill this update added, if any. One transaction:
+    the order, the fill and ``event`` land together or not at all.
+
+    The broker reports cumulative figures. ``filled_quantity`` (None: as
+    stored) is the total filled so far and ``avg_fill_price`` its average
+    price; when the total grows, the difference is one new fill, priced so
+    that the fills' value adds up to the broker's (``Δ(avg × qty) / Δqty``)
+    and named ``<broker_order_id>:<cumulative>``, so a replayed update
+    finds that name taken and records nothing twice. When nothing more
+    filled, the stored average stays as it is, whatever ``avg_fill_price``
+    says, so the fills always add up to ``avg_fill_price × filled_quantity``.
+    A total that shrinks,
+    or passes the order's quantity, or a growth with no positive price to
+    account for it, is refused: the broker's figures do not add up, and the
+    store will not guess.
+
+    ``broker_order_id`` is recorded the first time it is given and must not
+    change after. ``status`` follows the forward-only rule of migration
+    0004, which refuses anything else. An update to a terminal order that
+    changes nothing is a no-op (a replayed sync); one that changes anything
+    is refused. ``status_reason`` (None: as stored) says why, in words.
+    """
+    try:
+        if not isinstance(status, OrderStatus):
+            raise TypeError(f"status must be an OrderStatus, not {type(status).__name__}")
+        instant = _utc(synced_at, "synced_at")
+        with transaction(conn):
+            row = conn.execute(
+                "SELECT * FROM orders WHERE client_order_id = ?", (client_order_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError("no such order")
+            current = _row_to_order(row)
+            if current.decision_id is None:
+                raise ValueError("the order predates Phase 6: it changes through upsert_order")
+            total = current.filled_quantity if filled_quantity is None else filled_quantity
+            broker_id = broker_order_id if broker_order_id is not None else current.broker_order_id
+            if current.status in TERMINAL_ORDER_STATUSES and (
+                status is current.status
+                and total == current.filled_quantity
+                and broker_id == current.broker_order_id
+            ):
+                return current, None
+            if status is OrderStatus.FILLED and total != current.quantity:
+                raise ValueError(
+                    f"filled with {total:.10g} of {current.quantity:.10g}: a filled order is"
+                    " filled in full"
+                )
+            fill = _new_fill(current, total, avg_fill_price, broker_id, instant)
+            conn.execute(
+                "UPDATE orders SET status = ?, broker_order_id = ?, broker_status = ?,"
+                " filled_quantity = ?, avg_fill_price = ?, status_reason = ?,"
+                " last_synced_at = ?, updated_at = ? WHERE client_order_id = ?",
+                (
+                    status.value,
+                    broker_id,
+                    broker_status if broker_status is not None else current.broker_status,
+                    total,
+                    avg_fill_price if fill is not None else current.avg_fill_price,
+                    status_reason if status_reason is not None else current.status_reason,
+                    _iso(instant),
+                    _iso(instant),
+                    client_order_id,
+                ),
+            )
+            if fill is not None:
+                conn.execute(
+                    "INSERT INTO fills (id, order_id, filled_at, fill_price, fill_quantity, fees,"
+                    " broker_fill_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        fill.id,
+                        fill.order_id,
+                        _iso(fill.filled_at),
+                        fill.fill_price,
+                        fill.fill_quantity,
+                        fill.fees,
+                        fill.broker_fill_id,
+                    ),
+                )
+            if event is not None:
+                _insert_event(conn, event)
+            stored = _row_to_order(
+                conn.execute(
+                    "SELECT * FROM orders WHERE client_order_id = ?", (client_order_id,)
+                ).fetchone()
+            )
+    except _REPO_ERRORS as exc:
+        raise StoreError("apply broker update", client_order_id, exc) from exc
+    return stored, fill
+
+
+def _new_fill(
+    current: Order,
+    total: float,
+    avg_fill_price: float | None,
+    broker_order_id: str | None,
+    filled_at: datetime,
+) -> Fill | None:
+    """The fill that takes ``current`` from its stored filled quantity to
+    ``total``; None when nothing more filled. A ValueError when the figures
+    do not add up."""
+    if not math.isfinite(total) or total < 0:
+        raise ValueError(f"filled quantity {total!r} is not a quantity")
+    if total < current.filled_quantity:
+        raise ValueError(
+            f"filled quantity {total:.10g} is below the {current.filled_quantity:.10g} recorded"
+        )
+    if total > current.quantity:
+        raise ValueError(
+            f"filled quantity {total:.10g} is above the order's {current.quantity:.10g}"
+        )
+    delta = total - current.filled_quantity
+    if delta == 0:
+        return None
+    if broker_order_id is None:
+        raise ValueError("a fill needs the broker's order id")
+    if avg_fill_price is None or not math.isfinite(avg_fill_price) or avg_fill_price <= 0:
+        raise ValueError("a fill needs a positive average fill price")
+    before = (current.avg_fill_price or 0.0) * current.filled_quantity
+    price = (avg_fill_price * total - before) / delta
+    if not math.isfinite(price) or price <= 0:
+        raise ValueError(
+            f"the broker's average price {avg_fill_price:.10g} over {total:.10g} filled does"
+            " not account for the new fill with a positive price"
+        )
+    return Fill(
+        order_id=current.id,
+        filled_at=filled_at,
+        fill_price=price,
+        fill_quantity=delta,
+        broker_fill_id=_fill_id(broker_order_id, total),
+    )
+
+
+def get_order_by_broker_id(conn: sqlite3.Connection, broker_order_id: str) -> Order | None:
+    """The order the broker knows as ``broker_order_id``, or None."""
+    try:
+        row = conn.execute(
+            "SELECT * FROM orders WHERE broker_order_id = ?", (broker_order_id,)
+        ).fetchone()
+        return _row_to_order(row) if row is not None else None
+    except _REPO_ERRORS as exc:
+        raise StoreError("get order by broker id", broker_order_id, exc) from exc
+
+
+def get_proposal_order(conn: sqlite3.Connection, proposal_id: str) -> Order | None:
+    """The execution-era order placed for ``proposal_id`` (there is at most one), or None."""
+    try:
+        row = conn.execute(
+            "SELECT * FROM orders WHERE proposal_id = ? AND decision_id IS NOT NULL",
+            (proposal_id,),
+        ).fetchone()
+        return _row_to_order(row) if row is not None else None
+    except _REPO_ERRORS as exc:
+        raise StoreError("get proposal order", proposal_id, exc) from exc
+
+
+def get_decision(conn: sqlite3.Connection, decision_id: str) -> PolicyDecision | None:
+    """One policy decision by id, or None."""
+    try:
+        row = _decision_row(conn, decision_id)
+        return _row_to_decision(row) if row is not None else None
+    except _REPO_ERRORS as exc:
+        raise StoreError("get decision", decision_id, exc) from exc
+
+
+def get_decision_approval(conn: sqlite3.Connection, decision_id: str) -> Approval | None:
+    """The approval tied to ``decision_id`` (there is at most one), or None."""
+    try:
+        row = conn.execute(
+            "SELECT * FROM approvals WHERE decision_id = ?", (decision_id,)
+        ).fetchone()
+        return _row_to_approval(row) if row is not None else None
+    except _REPO_ERRORS as exc:
+        raise StoreError("get decision approval", decision_id, exc) from exc
 
 
 # --- reads ------------------------------------------------------------------

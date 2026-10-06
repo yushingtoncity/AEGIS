@@ -25,3 +25,18 @@ class StoreError(Exception):
         target = f"{what} for {key}" if key else what
         detail = f" ({type(cause).__name__}: {cause})" if cause is not None else ""
         super().__init__(f"store operation failed: {target}{detail}")
+
+
+class ClaimRefused(StoreError):
+    """``repo.claim_order`` would not claim the order, and wrote nothing.
+
+    Not a failure of the store: the controls, the daily trade cap or the
+    order's own links said no, read inside the claim's transaction.
+    ``reason`` says which, in words; the message keeps ``StoreError``'s
+    shape so a caller that only catches ``StoreError`` still prints one
+    clean line.
+    """
+
+    def __init__(self, key: str, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"claim order (refused: {reason})", key)

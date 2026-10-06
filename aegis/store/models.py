@@ -97,6 +97,31 @@ class Broker(str, Enum):
     LIVE = "live"
 
 
+class TimeInForce(str, Enum):
+    """How long a working order lives. Phase 6 places DAY orders only."""
+
+    DAY = "day"
+
+
+class PositionIntent(str, Enum):
+    """What a single-leg option order does to the position (Alpaca's
+    ``position_intent``); None for an equity order."""
+
+    BUY_TO_OPEN = "buy_to_open"
+    BUY_TO_CLOSE = "buy_to_close"
+    SELL_TO_OPEN = "sell_to_open"
+    SELL_TO_CLOSE = "sell_to_close"
+
+
+class DecisionPurpose(str, Enum):
+    """Why a policy decision was made: a verdict on a proposal (``evaluate``),
+    or the re-evaluation on fresh data just before its order is sent
+    (``pre_submit``)."""
+
+    EVALUATE = "evaluate"
+    PRE_SUBMIT = "pre_submit"
+
+
 class OrderStatus(str, Enum):
     PROPOSED = "proposed"
     GATED = "gated"
@@ -118,6 +143,11 @@ OPEN_ORDER_STATUSES: frozenset[OrderStatus] = frozenset(
     }
 )
 """Statuses an order can still move on from; filled/cancelled/failed are terminal."""
+
+TERMINAL_ORDER_STATUSES: frozenset[OrderStatus] = frozenset(
+    {OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.FAILED}
+)
+"""Statuses a claimed order never leaves (migration 0004 freezes the row)."""
 
 
 class EventLevel(str, Enum):
@@ -240,10 +270,17 @@ class PolicyDecision(StoreRecord):
     before Phase 5 may carry other keys."""
     failing_rule: str | None = None
     notes: str | None = None
+    purpose: DecisionPurpose = DecisionPurpose.EVALUATE
 
 
 class Approval(StoreRecord):
-    """A human approval request and, once answered, its response."""
+    """A human approval request and, once answered, its response.
+
+    ``decision_id`` ties the answer to one policy decision (Phase 6): an
+    order placed on a NEEDS_APPROVAL verdict rests on the approval of that
+    exact decision, valid until ``expires_at``. Approvals written before
+    Phase 6 have neither. Once a decision's approval is answered the answer
+    is final (migration 0004)."""
 
     proposal_id: str
     requested_at: datetime = Field(default_factory=utcnow)
@@ -251,10 +288,22 @@ class Approval(StoreRecord):
     response: ApprovalResponse | None = None
     channel: str
     responder: str | None = None
+    decision_id: str | None = None
+    expires_at: datetime | None = None
+    note: str | None = None
 
 
 class Order(StoreRecord):
-    """An order's current state; ``client_order_id`` is the idempotency key."""
+    """An order's current state; ``client_order_id`` is the idempotency key.
+
+    An order with a ``decision_id`` is execution-era (Phase 6): written only
+    by ``repo.claim_order`` and moved on only by ``repo.apply_broker_update``.
+    It names the decision that authorised it, the ``pre_submit`` decision it
+    passed just before it was sent (``regate_decision_id``) and the human
+    approval it rests on, if any. ``filled_quantity`` and ``avg_fill_price``
+    are the broker's cumulative figures; ``broker_status`` is the broker's
+    own word for the order, kept as reported. Orders written before Phase 6
+    leave all of these at their defaults."""
 
     proposal_id: str
     client_order_id: str
@@ -267,6 +316,18 @@ class Order(StoreRecord):
     side: OrderSide
     quantity: float = Field(gt=0)
     limit_price: float | None = None
+    decision_id: str | None = None
+    regate_decision_id: str | None = None
+    approval_id: str | None = None
+    instrument: Instrument | None = None
+    order_type: OrderType | None = None
+    time_in_force: TimeInForce | None = None
+    position_intent: PositionIntent | None = None
+    filled_quantity: float = Field(default=0.0, ge=0)
+    avg_fill_price: float | None = Field(default=None, gt=0)
+    broker_status: str | None = None
+    status_reason: str | None = None
+    last_synced_at: datetime | None = None
 
     @field_validator("symbol")
     @classmethod
@@ -282,6 +343,9 @@ class Fill(StoreRecord):
     fill_price: float
     fill_quantity: float = Field(gt=0)
     fees: float = 0.0
+    broker_fill_id: str | None = None
+    """The broker's name for this execution, unique: a replayed sync finds it
+    taken. None for fills recorded before Phase 6."""
 
 
 class PositionSnapshot(StoreRecord):

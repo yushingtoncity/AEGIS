@@ -9,6 +9,12 @@ read while the loop writes. The schema lives in versioned SQL files under
 failures are wrapped in ``StoreError`` with context, like ``DataError`` in
 the data layer.
 
+Since Phase 6 an order can be tied to the decision that authorised it:
+``claim_order`` writes such an order (the last check of the controls and
+the daily trade cap, and the first record, in one transaction) and
+``apply_broker_update`` moves it on as the broker reports, recording fills
+by the broker's cumulative figures.
+
 Since Phase 5 it also holds the operator's ``controls`` — the kill switch
 and the daily-loss halt — so that both survive a restart. ``get_controls``
 reads them and fails closed; ``set_kill_switch`` / ``set_halt_until`` write
@@ -16,13 +22,15 @@ them, each with its audit event in the same transaction.
 """
 
 from aegis.store.db import connect, migrate, open_store, schema_version
-from aegis.store.errors import StoreError
+from aegis.store.errors import ClaimRefused, StoreError
 from aegis.store.models import (
     OPEN_ORDER_STATUSES,
+    TERMINAL_ORDER_STATUSES,
     Approval,
     ApprovalResponse,
     Broker,
     Controls,
+    DecisionPurpose,
     Event,
     EventLevel,
     Fill,
@@ -33,6 +41,7 @@ from aegis.store.models import (
     OrderType,
     PnlSnapshot,
     PolicyDecision,
+    PositionIntent,
     PositionSnapshot,
     Proposal,
     ProposalLeg,
@@ -40,22 +49,29 @@ from aegis.store.models import (
     Reasoning,
     ReasoningStage,
     StoreStatus,
+    TimeInForce,
     TokenUsage,
     Verdict,
     new_id,
 )
 from aegis.store.repo import (
     add_reasoning,
+    apply_broker_update,
+    claim_order,
     count_orders_submitted_between,
     get_controls,
     get_cycle_reasoning,
     get_cycle_token_usage,
     get_daily_pnl,
+    get_decision,
+    get_decision_approval,
     get_latest_undecided_proposal,
     get_open_orders,
     get_order,
+    get_order_by_broker_id,
     get_proposal,
     get_proposal_legs,
+    get_proposal_order,
     get_proposal_trace,
     get_proposals_since,
     get_recent_events,
@@ -77,10 +93,13 @@ from aegis.store.repo import (
 
 __all__ = [
     "OPEN_ORDER_STATUSES",
+    "TERMINAL_ORDER_STATUSES",
     "Approval",
     "ApprovalResponse",
     "Broker",
+    "ClaimRefused",
     "Controls",
+    "DecisionPurpose",
     "Event",
     "EventLevel",
     "Fill",
@@ -91,6 +110,7 @@ __all__ = [
     "OrderType",
     "PnlSnapshot",
     "PolicyDecision",
+    "PositionIntent",
     "PositionSnapshot",
     "Proposal",
     "ProposalLeg",
@@ -99,20 +119,27 @@ __all__ = [
     "ReasoningStage",
     "StoreError",
     "StoreStatus",
+    "TimeInForce",
     "TokenUsage",
     "Verdict",
     "add_reasoning",
+    "apply_broker_update",
+    "claim_order",
     "connect",
     "count_orders_submitted_between",
     "get_controls",
     "get_cycle_reasoning",
     "get_cycle_token_usage",
     "get_daily_pnl",
+    "get_decision",
+    "get_decision_approval",
     "get_latest_undecided_proposal",
     "get_open_orders",
     "get_order",
+    "get_order_by_broker_id",
     "get_proposal",
     "get_proposal_legs",
+    "get_proposal_order",
     "get_proposal_trace",
     "get_proposals_since",
     "get_recent_events",
