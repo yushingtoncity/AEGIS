@@ -111,12 +111,32 @@ new approval columns.
 
 `aegis/execution/models.py` (`ApprovedOrder`, `OrderReceipt`,
 `ExecutionError` with an `outcome` of `rejected` / `not_sent` / `unknown`),
-typed signatures in `base.py` (imported relatively: an absolute import would
-put the identifier `execution` in `base.py` and break the architecture
-test's target check), and `aegis/execution/paper.py`: `PaperExecutor`, the
-only place a trading client is built for orders. It asserts the paper host,
-sets alpaca-py's retries to zero, and gives the HTTP session a timeout. All
-of it is tested against a fake client.
+typed signatures in `base.py`, and `aegis/execution/paper.py`:
+`PaperExecutor`, the only place a trading client is built for orders. It
+asserts the paper host (and its HTTP session refuses any other), sets
+alpaca-py's retries to zero, gives every request a timeout, and reads raw
+JSON. `submit_order` verifies the ApprovedOrder against the claimed store
+row and the controls, read-only, before it sends anything. All of it is
+tested against a fake client, and the hardening through alpaca-py's own
+request path with a recording transport.
+
+As built:
+
+- `base.py` imports its models relatively (an absolute import would put the
+  identifier `execution` in `base.py`) and only under `TYPE_CHECKING`: the
+  brain's architecture harness loads `base.py` by file path, outside any
+  package, to prove it catches such a load, so the file must run on its own.
+- The interface gained one read, `get_order(client_order_id)`, beside
+  `get_open_orders`: it is how a caller follows an order, and resolves an
+  unknown outcome. Like `get_open_orders` it is a read that the store also
+  defines, so the architecture test lists it as an interface read, not as
+  an order method.
+- D8 is rule (g) of `tests/test_policy_architecture.py`, enforced on every
+  module outside `aegis/execution`, `aegis/policy` and `aegis/data`
+  included (stricter than "outside data and execution": no data module
+  needs those calls).
+- `ApprovedOrder.quantity` is a whole number (fractional shares are out of
+  scope); `limit_price` is a Decimal with at most 4 places.
 
 ### 6c: dispatch, CLI, config, docs
 
