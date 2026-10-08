@@ -177,6 +177,16 @@ def _body(fixture, **changes):
     return body
 
 
+def _mleg_parent(fixture):
+    """A multi-leg parent as Alpaca lists it: symbol, side and asset blank,
+    the legs underneath (alpaca-py's own Order model reads '' as None)."""
+    return _body(
+        fixture, id="0b7c2f43-5d1e-4c39-9d0f-6f0a7f1b2c3d", client_order_id="dashboard-spread-1",
+        symbol="", side="", asset_id="", asset_class="", position_intent="", order_class="mleg",
+        qty="1", limit_price="1.25", status="new",
+    )
+
+
 def _option_body(fixture, **changes):
     return _body(fixture, symbol=OPTION, asset_class="us_option", qty="2", limit_price="8.25",
                  **changes)
@@ -315,6 +325,12 @@ class TestReceiptFromBroker:
         receipt = receipt_from_broker(_body(fixture, side="", qty=None), fetched_at=NOW)
         assert receipt.side is None and receipt.quantity is None
 
+    def test_a_multi_leg_parent_reads_with_no_symbol(self, fixture):
+        # found in review: Alpaca sends an mleg parent's symbol, side and asset blank
+        receipt = receipt_from_broker(_mleg_parent(fixture), fetched_at=NOW)
+        assert (receipt.symbol, receipt.side, receipt.quantity) == (None, None, Decimal("1"))
+        assert receipt.client_order_id == "dashboard-spread-1"
+
     @pytest.mark.parametrize(
         ("changes", "message"),
         [
@@ -335,7 +351,6 @@ class TestReceiptFromBroker:
             ({"qty": "zero"}, "qty is not a number"),
             ({"side": "short"}, "short"),
             ({"client_order_id": None}, "client_order_id"),
-            ({"symbol": None}, "symbol"),
         ],
     )
     def test_what_it_will_not_read_as_an_order(self, fixture, changes, message):
@@ -635,6 +650,32 @@ class TestSubmit:
         error = _refused(venue, approved)
         assert error.outcome is ExecutionOutcome.UNKNOWN and message in str(error)
 
+    def test_a_clock_that_fails_after_the_send_is_an_unknown_outcome(self, conn, fixture):
+        # found in review: after a request is made nothing may read as not_sent
+        approved = _equity()
+        _claim(conn, approved)
+        readings = iter([NOW, datetime(2026, 7, 30, 15, 0)])  # aware for the check, naive after
+        venue, client = _venue(conn, _body(fixture), clock=lambda: next(readings))
+        error = _refused(venue, approved)
+        assert error.outcome is ExecutionOutcome.UNKNOWN and len(client.calls) == 1
+
+    @pytest.mark.parametrize(
+        ("update", "message"),
+        [
+            ({"approval_id": None}, "only with a human approval"),
+            ({"quantity": 2.5}, "valid integer"),
+            ({"position_intent": PositionIntent.SELL_TO_CLOSE}, "names its position intent"),
+        ],
+    )
+    def test_a_copy_that_skipped_the_rules_is_not_sent(self, conn, update, message):
+        # found in review: model_copy(update=...) builds a copy without validation
+        approved = _option()
+        _claim(conn, approved)
+        venue, client = _venue(conn)
+        error = _refused(venue, approved.model_copy(update=update))
+        assert error.outcome is ExecutionOutcome.NOT_SENT and message in str(error)
+        assert client.calls == []
+
     @pytest.mark.parametrize("body", [None, [], "ok"])
     def test_an_answer_that_is_no_order_is_an_unknown_outcome(self, conn, body):
         approved = _equity()
@@ -681,6 +722,17 @@ class TestCancel:
             venue.cancel_order(BROKER_ID)
         assert (info.value.outcome, info.value.status_code) == (ExecutionOutcome.REJECTED, 404)
         assert len(client.calls) == 2
+
+    def test_a_read_back_about_another_order_proves_nothing(self, conn, fixture):
+        other = _body(fixture, id="7f1c1d2e-1111-4bfd-b9c3-01e75843f47d", status="canceled")
+        venue, _ = _venue(conn, _api_error(422), other)
+        with pytest.raises(ExecutionError) as info:
+            venue.cancel_order(BROKER_ID)
+        assert (info.value.outcome, info.value.status_code) == (ExecutionOutcome.REJECTED, 422)
+
+    def test_the_read_back_matches_the_id_in_any_case(self, conn, fixture):
+        venue, _ = _venue(conn, _api_error(422), _body(fixture, status="canceled"))
+        assert venue.cancel_order(BROKER_ID.upper()) is None
 
     def test_a_refusal_that_cannot_be_read_back_stays_a_refusal(self, conn):
         venue, _ = _venue(conn, _api_error(422), requests.exceptions.ReadTimeout())
@@ -730,10 +782,19 @@ class TestReads:
         with pytest.raises(ExecutionError, match="not a list"):
             venue.get_open_orders()
 
-    def test_one_order_it_cannot_read_fails_the_listing(self, conn, fixture):
+    def test_a_multi_leg_order_on_the_account_does_not_blind_the_listing(self, conn, fixture):
+        # found in review: one hand-placed spread made the whole listing unreadable
+        venue, _ = _venue(conn, [_body(fixture), _mleg_parent(fixture)])
+        receipts = venue.get_open_orders()
+        assert [(r.client_order_id, r.symbol) for r in receipts] == [
+            ("aegis-prop-0001", "AAPL"), ("dashboard-spread-1", None),
+        ]
+
+    def test_one_order_it_cannot_read_fails_the_listing_and_is_named(self, conn, fixture):
         venue, _ = _venue(conn, [_body(fixture), _body(fixture, id="nope")])
-        with pytest.raises(ExecutionError, match="get open orders"):
+        with pytest.raises(ExecutionError, match="get open orders for nope") as info:
             venue.get_open_orders()
+        assert info.value.key == "nope" and info.value.outcome is ExecutionOutcome.UNKNOWN
 
     def test_a_failed_listing(self, conn):
         venue, _ = _venue(conn, _api_error(503))
@@ -777,6 +838,12 @@ class TestClosePosition:
         with pytest.raises(ExecutionError) as info:
             venue.close_position(bad)
         assert info.value.outcome is ExecutionOutcome.NOT_SENT and client.calls == []
+
+    def test_a_clock_that_fails_after_the_close_is_an_unknown_outcome(self, conn, fixture):
+        venue, client = _venue(conn, _body(fixture), clock=lambda: datetime(2026, 7, 30, 15, 0))
+        with pytest.raises(ExecutionError) as info:
+            venue.close_position("AAPL")
+        assert info.value.outcome is ExecutionOutcome.UNKNOWN and len(client.calls) == 1
 
     def test_a_failure(self, conn):
         venue, _ = _venue(conn, _api_error(504))
@@ -848,6 +915,23 @@ class TestHardenedClient:
     def test_a_timeout_that_is_not_one_is_refused(self, timeout):
         with pytest.raises(ValueError, match="positive number of seconds"):
             paper_trading_client(timeout_seconds=timeout, api_key="k", secret_key="s")
+
+    @pytest.mark.parametrize(
+        ("api_key", "secret_key"),
+        [
+            ("test-key-id", "test-secret\n"),
+            (" test-key-id", "test-secret"),
+            ("test key", "test-secret"),
+            ("test-key-id", ""),
+            ("test-key-id", "test\x00secret"),
+            ("test-key-id", 12345),
+        ],
+    )
+    def test_a_key_that_is_not_one_word_is_refused_without_showing_it(self, api_key, secret_key):
+        # found in review: a stray newline put the header value, key and all, in the error
+        with pytest.raises(ValueError, match="its value is not shown") as info:
+            paper_trading_client(timeout_seconds=TIMEOUT, api_key=api_key, secret_key=secret_key)
+        assert "test-secret" not in str(info.value) and "test-key-id" not in str(info.value)
 
     def test_one_key_without_the_other_is_refused(self):
         with pytest.raises(ValueError, match="both keys"):

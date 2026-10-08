@@ -127,15 +127,18 @@ class OrderReceipt(BaseModel):
     ``status`` is what it means in the store's terms. ``filled_quantity`` and
     ``avg_fill_price`` are the broker's cumulative figures (the store turns
     their growth into fills). ``avg_fill_price`` is None while nothing has
-    filled. ``side`` and ``quantity`` are None only for an order that has
-    none (a multi-leg parent, a notional order), which AEGIS never sends.
+    filled. ``symbol``, ``side`` and ``quantity`` are None only for an order
+    that has none: a multi-leg parent (Alpaca sends them blank; its legs
+    carry them) or a notional order, neither of which AEGIS ever sends, but
+    either of which may sit on the account and must not make a listing of
+    it unreadable.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     broker_order_id: str = Field(min_length=1)
     client_order_id: str = Field(min_length=1)
-    symbol: str = Field(min_length=1)
+    symbol: str | None = Field(default=None, min_length=1)
     side: OrderSide | None = None
     quantity: Decimal | None = Field(default=None, gt=0, allow_inf_nan=False)
     broker_status: str = Field(min_length=1)

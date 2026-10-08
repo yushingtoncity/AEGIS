@@ -137,12 +137,13 @@ def receipt_from_broker(body: object, *, fetched_at: datetime) -> OrderReceipt:
         raise ValueError("the order has no status")
     filled = _decimal(body.get("filled_qty"), "filled_qty")
     average = body.get("filled_avg_price")
+    symbol = body.get("symbol")
     side = body.get("side")
     quantity = body.get("qty")
     return OrderReceipt(
         broker_order_id=broker_order_id,
         client_order_id=body.get("client_order_id"),
-        symbol=body.get("symbol"),
+        symbol=None if _blank(symbol) else symbol,
         side=None if _blank(side) else OrderSide(side),
         quantity=None if _blank(quantity) else _decimal(quantity, "qty"),
         broker_status=status,
@@ -253,6 +254,12 @@ def paper_trading_client(
     if api_key is None:
         load_env()
         api_key, secret_key = require_env("ALPACA_API_KEY"), require_env("ALPACA_SECRET_KEY")
+    for name, value in (("api_key", api_key), ("secret_key", secret_key)):
+        # a stray space or newline would end up quoted in an HTTP error message
+        if not isinstance(value, str) or not value or not value.isprintable() or any(
+            character.isspace() for character in value
+        ):
+            raise ValueError(f"{name} must be one word of printable text (its value is not shown)")
     client = TradingClient(api_key=api_key, secret_key=secret_key, paper=True, raw_data=True)
     client._retry = 0
     client._retry_wait = 0
@@ -349,6 +356,12 @@ def _receipt_mismatch(receipt: OrderReceipt, order: ApprovedOrder) -> str | None
     return None
 
 
+def _id_of(item: object) -> str | None:
+    """The broker id of a listed order, to name the one that would not read."""
+    found = item.get("id") if isinstance(item, Mapping) else None
+    return found if isinstance(found, str) else None
+
+
 # --- the Executor ---------------------------------------------------------------
 
 
@@ -385,8 +398,11 @@ class PaperExecutor(Executor):
         return now
 
     def _receipt(self, body: object, what: str, key: str | None) -> OrderReceipt:
+        """The broker's answer, read. Called after a request was made, so
+        anything wrong here (the answer, or the clock that stamps it) is an
+        unknown outcome, never ``not_sent``."""
         try:
-            return receipt_from_broker(body, fetched_at=self._now())
+            return receipt_from_broker(body, fetched_at=self._clock())
         except (ValueError, ValidationError) as exc:
             raise ExecutionError(what, key, exc, outcome=ExecutionOutcome.UNKNOWN) from exc
 
@@ -397,6 +413,12 @@ class PaperExecutor(Executor):
                 outcome=ExecutionOutcome.NOT_SENT,
             )
         key = order.client_order_id
+        try:  # again: model_copy(update=...) makes a copy without running the rules
+            order = ApprovedOrder.model_validate(order.model_dump(warnings=False))
+        except ValidationError as exc:
+            raise ExecutionError(
+                "submit order", key, exc, outcome=ExecutionOutcome.NOT_SENT
+            ) from exc
         why_not = _unsendable(self._conn, order, self._now())
         if why_not is not None:
             raise ExecutionError(
@@ -442,6 +464,8 @@ class PaperExecutor(Executor):
         except Exception:
             raise refusal from refusal.cause
         receipt = self._receipt(body, "cancel order", broker_order_id)
+        if UUID(receipt.broker_order_id) != UUID(broker_order_id):
+            raise refusal from refusal.cause  # an answer about another order proves nothing
         if receipt.status is OrderStatus.CANCELLED:
             return
         raise ExecutionError(
@@ -467,7 +491,7 @@ class PaperExecutor(Executor):
                 cause=ValueError(f"{len(body)} orders fill the broker's page: more may be open"),
                 outcome=ExecutionOutcome.UNKNOWN,
             )
-        return [self._receipt(item, "get open orders", None) for item in body]
+        return [self._receipt(item, "get open orders", _id_of(item)) for item in body]
 
     def get_order(self, client_order_id: str) -> OrderReceipt | None:
         try:

@@ -138,6 +138,25 @@ As built:
 - `ApprovedOrder.quantity` is a whole number (fractional shares are out of
   scope); `limit_price` is a Decimal with at most 4 places.
 
+Notes for 6c, from the 6b review (what the executor deliberately leaves to
+the dispatcher):
+
+- Mint, then claim. Build the `ApprovedOrder` from the proposal, then the
+  store `Order` from it (`quantity=float(...)`, `limit_price=float(...)`),
+  and claim that. The reverse needs `int()` and a Decimal from the float.
+- Claim and send in one call. The executor sends a claimed row it has never
+  seen before, whatever its age; it does not check how long ago it was
+  claimed, nor the approval's expiry again. `place` must send right after
+  its own claim, and only then.
+- Record every attempt. An interrupted send (Ctrl-C mid-request) leaves the
+  row `approved` with nothing on record, which the executor would send
+  again. `place` writes `status_reason` for any outcome but a receipt, and
+  `sync` resolves an `approved` row by `get_order` before anything else.
+- The static rules read names. A module that calls the data layer's
+  trading client with alpaca-py's generic `post` / `delete` on `/orders`
+  names nothing rules (f) and (g) look for; review catches that, the rules
+  do not.
+
 ### 6c: dispatch, CLI, config, docs
 
 `aegis/policy/dispatch.py` (the only caller of an Executor; not one of the

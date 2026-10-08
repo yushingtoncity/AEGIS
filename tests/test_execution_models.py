@@ -193,6 +193,7 @@ class TestOrderReceipt:
             ({"fetched_at": datetime(2026, 7, 30, 15, 0)}, "timezone-aware"),
             ({"broker_status": ""}, "at least 1 character"),
             ({"broker_order_id": ""}, "at least 1 character"),
+            ({"symbol": ""}, "at least 1 character"),
             ({"quantity": Decimal("0")}, "greater than 0"),
             ({"note": "x"}, "Extra inputs are not permitted"),
         ],
@@ -201,9 +202,12 @@ class TestOrderReceipt:
         with pytest.raises(ValidationError, match=message):
             _receipt(**overrides)
 
-    def test_an_order_without_side_or_quantity(self):
-        receipt = _receipt(side=None, quantity=None, filled_quantity=Decimal("2"), avg_fill_price=Decimal("1.5"))
-        assert receipt.side is None and receipt.quantity is None
+    def test_an_order_without_symbol_side_or_quantity(self):
+        receipt = _receipt(
+            symbol=None, side=None, quantity=None, filled_quantity=Decimal("2"),
+            avg_fill_price=Decimal("1.5"),
+        )
+        assert receipt.symbol is None and receipt.side is None and receipt.quantity is None
 
 
 class TestExecutionError:
