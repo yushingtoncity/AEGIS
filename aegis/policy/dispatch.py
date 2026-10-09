@@ -557,6 +557,17 @@ def answer(
         )
     now = _now(clock)
     expires_at = now + timedelta(seconds=config.broker.approval_ttl_seconds) if approved else None
+    if existing is not None:
+        # A request row recorded before the answer fixes its own expiry (the
+        # store never changes it), so a "yes" written onto it is only good
+        # until then. One with no expiry, or one already past, could never be
+        # placed: refuse rather than write an answer that cannot be used.
+        expires_at = existing.expires_at
+        if approved and (expires_at is None or not now < expires_at):
+            when = "none set" if expires_at is None else f"it expired {expires_at.isoformat()}"
+            raise PlacementError(
+                f"{what} (the approval request on record cannot carry a yes: {when})", decision_id
+            )
     response = ApprovalResponse.APPROVED if approved else ApprovalResponse.REJECTED
     clean_note = _one_line(note) if note else None
     return record_approval(
@@ -570,7 +581,7 @@ def answer(
             channel=APPROVAL_CHANNEL,
             responder=responder,
             decision_id=decision.id,
-            expires_at=existing.expires_at if existing is not None else expires_at,
+            expires_at=expires_at,
             note=clean_note,
         ),
         event=_event(
