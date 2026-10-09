@@ -52,7 +52,14 @@ from aegis.policy.models import (
     RuleResult,
 )
 from aegis.policy.rules import RULE_NAMES, RULES, Rule, daily_loss_limit
-from aegis.store.models import Controls, Event, EventLevel, PolicyDecision, Verdict
+from aegis.store.models import (
+    Controls,
+    DecisionPurpose,
+    Event,
+    EventLevel,
+    PolicyDecision,
+    Verdict,
+)
 from aegis.store.repo import get_controls, record_decision, set_halt_until
 
 ENGINE_INTEGRITY = "engine_integrity"
@@ -322,6 +329,7 @@ def _verdict_event(
         "verdict": decision.verdict.value,
         "failing_rule": decision.failing_rule,
         "symbol": order.symbol,
+        **({} if decision.purpose is DecisionPurpose.EVALUATE else {"purpose": decision.purpose.value}),
         "non_pass": [
             {"rule": result.name, "outcome": result.outcome.value, "detail": result.detail}
             for result in evaluation.non_pass
@@ -387,6 +395,7 @@ def evaluate(
     conn: sqlite3.Connection,
     *,
     dry_run: bool = False,
+    purpose: DecisionPurpose = DecisionPurpose.EVALUATE,
 ) -> PolicyDecision:
     """Judge one proposal and record the verdict; returns the decision as stored.
 
@@ -416,6 +425,11 @@ def evaluate(
        ``policy_reject`` (WARNING), ``policy_flag_only`` or
        ``policy_needs_approval`` (INFO); AUTO_EXECUTE logs none.
 
+    ``purpose`` is what the decision is recorded as: ``evaluate``, a verdict
+    on the proposal, or ``pre_submit``, the re-check ``aegis.policy.dispatch``
+    runs just before it sends the order (spec D3). The judging is the same
+    either way; a ``pre_submit`` decision's event says so in its payload.
+
     A ``StoreError`` propagates: a verdict that could not be recorded is
     never reported as recorded.
     """
@@ -431,6 +445,7 @@ def evaluate(
         rules_evaluated=evaluation.rules_evaluated,
         failing_rule=evaluation.failing_rule,
         notes=_summary(evaluation),
+        purpose=purpose,
     )
     if dry_run:
         return decision

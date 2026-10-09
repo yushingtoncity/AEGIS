@@ -11,6 +11,7 @@ import os
 import re
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
@@ -298,6 +299,27 @@ class RiskLimits(BaseModel):
         return [s.strip().upper() for s in value if s.strip()]
 
 
+class BrokerConfig(BaseModel):
+    """Phase 6: placing policy-approved orders on the paper account.
+
+    Shipped with ``enabled: false``: nothing is sent to the broker until the
+    operator turns it on, on the mini. Reading the broker (``orders sync``)
+    and standing down (cancelling working orders under the kill switch or a
+    halt) work either way; placing does not. ``kind`` is ``paper``, the only
+    broker Phase 6 has. The timing values are the gates of spec decision D1
+    (docs/phase6/SPEC_PHASE6.md), approved with these values.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+
+    enabled: bool = False
+    kind: Literal["paper"] = "paper"
+    http_timeout_seconds: float = Field(default=10.0, gt=0)
+    max_decision_age_seconds: float = Field(default=300.0, gt=0)
+    approval_ttl_seconds: float = Field(default=900.0, gt=0)
+    not_found_grace_seconds: float = Field(default=120.0, ge=0)
+
+
 class AegisConfig(BaseModel):
     """The validated contents of config.yaml."""
 
@@ -310,6 +332,7 @@ class AegisConfig(BaseModel):
     store: StoreConfig = StoreConfig()
     brain: BrainConfig = BrainConfig()
     risk_limits: RiskLimits = RiskLimits()
+    broker: BrokerConfig = BrokerConfig()
 
     @field_validator("watchlist")
     @classmethod

@@ -286,3 +286,45 @@ def test_risk_limits_are_frozen(tmp_path):
 def test_invalid_risk_limits_rejected(tmp_path, text):
     with pytest.raises(ConfigError):
         load_config(write(tmp_path, MINIMAL + text))
+
+
+def test_broker_block_defaults(tmp_path):
+    broker = load_config(write(tmp_path, MINIMAL)).broker
+    assert broker.enabled is False and broker.kind == "paper"
+    assert (broker.http_timeout_seconds, broker.max_decision_age_seconds) == (10.0, 300.0)
+    assert (broker.approval_ttl_seconds, broker.not_found_grace_seconds) == (900.0, 120.0)
+
+
+def test_shipped_broker_block_matches_the_code_defaults():
+    """config.yaml states every broker value, ships with placing off, and
+    holds the D1 values the user approved."""
+    import yaml
+
+    from aegis.config import BrokerConfig
+
+    shipped = load_config(DEFAULT_CONFIG_PATH).broker
+    assert shipped == BrokerConfig()
+    assert shipped.enabled is False
+    block = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))["broker"]
+    assert set(block) == set(BrokerConfig.model_fields)
+    assert (
+        block["max_decision_age_seconds"], block["approval_ttl_seconds"],
+        block["not_found_grace_seconds"],
+    ) == (300, 900, 120)
+
+
+@pytest.mark.parametrize(
+    "broker",
+    [
+        "  kind: live\n",
+        "  http_timeout_seconds: 0\n",
+        "  max_decision_age_seconds: -1\n",
+        "  approval_ttl_seconds: .inf\n",
+        "  not_found_grace_seconds: -5\n",
+        "  enabled: maybe\n",
+        "  base_url: https://api.alpaca.markets\n",
+    ],
+)
+def test_broker_block_refuses_what_it_cannot_honour(tmp_path, broker):
+    with pytest.raises(ConfigError, match="broker"):
+        load_config(write(tmp_path, MINIMAL + "broker:\n" + broker))

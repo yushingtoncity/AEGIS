@@ -638,9 +638,9 @@ stderr and exit 1, never a traceback.
 
 ### What the gate does not do
 
-- It places no order. Phase 6 adds the paper Executor (below); until the
-  dispatcher that calls it lands (PR 6c), every verdict, `AUTO_EXECUTE`
-  included, is a row in `policy_decisions`.
+- It places no order. `policy evaluate` records verdicts and nothing else,
+  `AUTO_EXECUTE` included; placing is `python -m aegis.cli.orders`, with
+  `broker.enabled` on (Phase 6, below).
 - It does not reject a quote dated after the context's as-of time. The
   context's clock is read before its quotes are fetched, so a real-time
   quote is routinely a little ahead of it; such a quote counts as fresh, and
@@ -651,9 +651,9 @@ stderr and exit 1, never a traceback.
 
 ## Execution (Phase 6)
 
-`aegis/execution` is the broker boundary. Nothing calls it yet: PR 6c adds
-the dispatcher in `aegis/policy` (the only package allowed to hold an
-Executor) and the `orders` CLI. What is here:
+`aegis/execution` is the broker boundary, and `aegis/policy/dispatch.py`
+is its one caller (the policy engine is the only package allowed to hold an
+Executor). The broker package:
 
 - **`models.py`.** `ApprovedOrder` is the only thing an Executor sends. It
   names the decision that authorised it, the `pre_submit` re-check it
@@ -691,6 +691,59 @@ The list is pinned against every order-writing method alpaca-py's
 `TradingClient` has, and the executor itself names only
 `cancel_order_by_id`.
 
+### Placing orders: `python -m aegis.cli.orders`
+
+Shipped with `broker.enabled: false` in config.yaml: nothing is sent until
+you turn it on, on the mini.
+
+```bash
+python -m aegis.cli.orders pending                         # verdicts awaiting approval, decisions ready to place
+python -m aegis.cli.orders approve DECISION_ID --by NAME   # or reject; once, tied to that decision
+python -m aegis.cli.orders place DECISION_ID [--dry-run]   # re-check, claim, send one order
+python -m aegis.cli.orders status [CLIENT_ORDER_ID] [--all]
+python -m aegis.cli.orders sync                            # follow every open order at the broker
+python -m aegis.cli.orders cancel CLIENT_ORDER_ID
+python -m aegis.cli.orders stand-down                      # under the kill switch or a halt: cancel working orders
+python -m aegis.cli.orders tick                            # sync, stand down if needed, place what may go
+```
+
+What `place` does, in order:
+
+1. **The verdict must still stand.** It is the latest verdict on its
+   proposal, the proposal has no order yet (one order per proposal, ever),
+   and it is either AUTO_EXECUTE and younger than
+   `broker.max_decision_age_seconds` (300), or NEEDS_APPROVAL with an
+   "approved" answer less than `broker.approval_ttl_seconds` (900) old.
+2. **A fresh re-check.** The whole engine runs again on new data and is
+   recorded as a `pre_submit` decision. An AUTO_EXECUTE order goes only if
+   the re-check is AUTO_EXECUTE too. An approved order goes only if
+   nothing rejects or flags, and every rule that escalates now was already
+   escalating when the human said yes.
+3. **The order.** Phase 6 places equity orders, and single option contracts
+   bought to open or sold to close (multi-leg orders wait for a live check
+   of Alpaca's debit/credit sign). Always LIMIT, DAY, a whole quantity.
+4. **The claim, then one send.** `claim_order` re-reads the kill switch and
+   the halt and counts the daily cap in one transaction, then the order is
+   sent once. A refusal is recorded as `failed`. An answer that never came
+   back is an unknown outcome: the order stays claimed (and counted), a
+   CRITICAL event says so, and it is looked up by name once. It is never
+   sent again.
+
+`sync` brings every open order up to date, fills included. An order the
+broker never acknowledged and still does not know after
+`broker.not_found_grace_seconds` (120) is marked cancelled, and still
+counts toward the daily cap. An order open at the broker that the store does
+not hold open (one placed by hand in the Alpaca dashboard, say) is an
+orphan: a CRITICAL event, and the kill switch goes on. `stand-down` cancels
+every working order while the kill switch is on, a halt is in force, or
+the halt cannot be read; it never flattens a position. `policy kill on`
+itself only sets the switch: run `orders stand-down` (or `tick`) after it.
+
+`sync`, `cancel` and `stand-down` work with placing off, so turning it off
+never strands an order that is already working. Every step is an event and
+a row in the store, and `python -m aegis.cli.trace PROPOSAL_ID` shows the
+re-check, the approval, the order and its fills.
+
 ## Repo layout
 
 ```
@@ -703,7 +756,7 @@ aegis/
   brain/             scan -> thesis -> proposal: llm client, prompts/, snapshot, stages, cycle
   policy/            the deterministic gate: models, context, measures, rules, engine, limits
   execution/         the broker boundary: base (the Executor interface), models, paper (PaperExecutor)
-  cli/               operator tools: check, snapshot, db, trace, brain, policy
+  cli/               operator tools: check, snapshot, db, trace, brain, policy, orders
   notify/ dashboard/ stubs for later phases
 tests/               config, cache, model-parsing, pricing, position, store, brain, policy and execution tests (canned JSON, FakeLLM, fake broker clients, hand-built contexts, tmp_path DBs)
 docs/phase5/         working documents of the policy-engine phase: spec, decisions, review rulings

@@ -157,3 +157,21 @@ risk_limits:
   auto_execute:                  # the only path to an order without a human: equity, limit, watchlist, small
     enabled: true                # paper default; options never auto-execute in this phase
     max_notional: 1000.0         # USD
+
+# Phase 6: placing policy-approved orders on the Alpaca PAPER account
+# (docs/phase6/SPEC_PHASE6.md). Nothing here loosens a risk limit: these
+# values only decide when an order that the policy engine already approved
+# may still be sent, and how the store follows it at the broker.
+broker:
+  # Off until you turn it on, on the mini (spec decision D2). While false,
+  # `orders place` and `orders tick` send nothing; reading the broker
+  # (`orders sync`) and cancelling working orders under the kill switch or a
+  # halt (`orders stand-down`) still work, so turning it off never strands an
+  # order that is already working.
+  enabled: false
+  kind: paper                    # the only broker Phase 6 has; anything else is refused
+  http_timeout_seconds: 10       # alpaca-py sets no timeout; 10 s is long for one order request and short enough not to hang a tick
+  # The gates of spec decision D1 (approved):
+  max_decision_age_seconds: 300  # an AUTO_EXECUTE verdict older than 5 minutes is not acted on; the next brain cycle proposes again
+  approval_ttl_seconds: 900      # a human "yes" is good for 15 minutes; the order is re-checked against fresh data either way
+  not_found_grace_seconds: 120   # an order whose send ended unclear and that the broker still does not know after 2 minutes is marked cancelled (it still counts toward max_daily_trades)
