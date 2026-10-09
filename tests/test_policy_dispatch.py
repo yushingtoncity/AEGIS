@@ -34,6 +34,7 @@ from aegis.policy.context import trading_day, wall_clock
 from aegis.policy.engine import evaluate
 from aegis.policy.errors import PlacementError
 from aegis.store import (
+    Approval,
     ApprovalResponse,
     Controls,
     DecisionPurpose,
@@ -54,6 +55,7 @@ from aegis.store import (
     get_proposal_order,
     insert_proposal,
     open_store,
+    record_approval,
     record_decision,
     set_halt_until,
     set_kill_switch,
@@ -560,6 +562,39 @@ class TestAnswer:
         _, verdict = _judged(conn, long_call())
         with pytest.raises(PlacementError, match="say who answers"):
             dispatch.answer(conn, verdict.id, approved=True, by=by, config=CONFIG, clock=lambda: LATER)
+
+    def _requested(self, conn, verdict, expires_at):
+        """An approval request on record before anyone answers (a future
+        notifier's row): its expiry is fixed when it is written."""
+        return record_approval(conn, Approval(
+            proposal_id=verdict.proposal_id, requested_at=NOW, channel="notifier",
+            decision_id=verdict.id, expires_at=expires_at,
+        ))
+
+    def test_a_yes_on_a_request_with_an_expiry_lasts_until_that_expiry(self, conn):
+        _, verdict = _judged(conn, long_call())
+        until = LATER + timedelta(seconds=60)
+        request = self._requested(conn, verdict, until)
+        approval = _approve(conn, verdict)
+        assert approval.id == request.id and approval.expires_at == until
+        payload = conn.execute(
+            "SELECT payload FROM events WHERE kind = 'approval_answered'"
+        ).fetchone()[0]
+        assert until.isoformat() in payload  # the event says what the row holds
+        assert _place(conn, verdict.id).order.approval_id == request.id
+
+    @pytest.mark.parametrize("offset", [None, timedelta(seconds=-1), timedelta(0)])
+    def test_a_yes_that_could_never_be_placed_is_refused(self, conn, offset):
+        _, verdict = _judged(conn, long_call())
+        self._requested(conn, verdict, None if offset is None else LATER + offset)
+        before = _snapshot(conn)
+        with pytest.raises(PlacementError, match="cannot carry a yes"):
+            _approve(conn, verdict)
+        assert _snapshot(conn) == before
+        assert [d.id for d in dispatch.awaiting_approval(conn, CONFIG, LATER)] == [verdict.id]
+        answer = dispatch.answer(conn, verdict.id, approved=False, by="op", config=CONFIG,
+                                 clock=lambda: LATER)
+        assert answer.response is ApprovalResponse.REJECTED
 
     def test_a_naive_clock_is_refused(self, conn):
         _, verdict = _judged(conn, long_call())
