@@ -164,6 +164,32 @@ pure modules), `python -m aegis.cli.orders` (`pending`, `status`, `approve`,
 `reject`, `place [--dry-run]`, `sync`, `cancel`, `stand-down`, `tick`), the
 `broker:` config block, README, and the mini checklist.
 
+As built:
+
+- `broker:` in config.yaml: `enabled: false`, `kind: paper`,
+  `http_timeout_seconds: 10`, and the D1 values (300, 900, 120). Frozen,
+  extra keys refused, `kind` is `paper` or nothing.
+- `engine.evaluate(..., purpose=)` records the re-check as a `pre_submit`
+  decision; its event payload says so. `context.wall_clock()` and
+  `context.trading_day()` are the dispatcher's clock and day (a policy
+  module other than `context.py` may read no clock).
+- New store reads: `get_execution_orders`, `get_latest_verdict`,
+  `get_verdicts_since`, `get_live_approvals`; `record_approval` takes an
+  `event` written in the same transaction.
+- The dispatcher hands back store models only and turns every broker
+  failure into `PlacementError(PolicyError)` with an `outcome`, so the CLI
+  never holds an execution-package type. It builds the broker itself (the
+  CLI passes a factory, `None` in production).
+- Option intent (D6): buy to open, or sell to close a long the account
+  holds. Selling to open (writing an option) and buying to close a short are
+  refused as out of Phase 6.
+- Every placement attempt is on the record before it can be repeated: a
+  refusal or nothing-sent is `failed` with its reason, an unknown outcome or
+  an interrupted send is `approved` with `status_reason` starting
+  `unknown_outcome`, which the executor will never send again.
+- The trace CLI labels `pre_submit` decisions and shows an order's decision
+  links, fills, broker status and reason.
+
 ## Live checks for the mini (before 6c merges)
 
 1. `client_order_id` length and charset limits; what Alpaca returns for a

@@ -42,6 +42,10 @@ from aegis.store.repo import (
     count_orders_submitted_between,
     get_decision,
     get_decision_approval,
+    get_execution_orders,
+    get_latest_verdict,
+    get_live_approvals,
+    get_verdicts_since,
     get_order,
     get_order_by_broker_id,
     get_proposal_order,
@@ -990,3 +994,57 @@ class TestSweep:
         finally:
             conn.close()
         assert landed >= 300 and refused >= 300 and terminal_seen >= 20, (landed, refused, terminal_seen)
+
+
+# --- the reads Phase 6's dispatcher uses ------------------------------------------
+
+
+class TestDispatchReads:
+    def test_execution_orders_lists_claimed_orders_only(self, conn):
+        _seed(conn)
+        _seed(conn, "prop-0002")
+        upsert_order(conn, _legacy_order())
+        first = _claim(conn)
+        second = _claim(conn, _order("prop-0002"))
+        assert [o.id for o in get_execution_orders(conn)] == [first.id, second.id]
+        apply_broker_update(conn, second.client_order_id, status=OrderStatus.CANCELLED,
+                            synced_at=NOW, status_reason="test")
+        assert [o.id for o in get_execution_orders(conn)] == [first.id]
+        assert [o.id for o in get_execution_orders(conn, open_only=False)] == [first.id, second.id]
+
+    def test_the_latest_verdict_ignores_pre_submit_checks(self, conn):
+        _seed(conn)
+        assert get_latest_verdict(conn, "prop-0001").id == "dec-prop-0001"
+        record_decision(conn, _decision("prop-0001", "dec-later", Verdict.REJECT, minutes_ago=0))
+        record_decision(conn, _decision("prop-0001", "pre-later", Verdict.AUTO_EXECUTE,
+                                        DecisionPurpose.PRE_SUBMIT, minutes_ago=-1))
+        assert get_latest_verdict(conn, "prop-0001").id == "dec-later"
+        assert get_latest_verdict(conn, "prop-nowhere") is None
+
+    def test_verdicts_since_by_verdict_and_bound(self, conn):
+        _seed(conn)  # dec-prop-0001: AUTO_EXECUTE, a minute ago
+        _seed(conn, "prop-0002", verdict=Verdict.NEEDS_APPROVAL)
+        record_decision(conn, _decision("prop-0002", "dec-old", Verdict.NEEDS_APPROVAL, minutes_ago=90))
+        since = NOW - timedelta(minutes=1)
+        assert [d.id for d in get_verdicts_since(conn, since, Verdict.AUTO_EXECUTE)] == ["dec-prop-0001"]
+        assert [d.id for d in get_verdicts_since(conn, since, Verdict.NEEDS_APPROVAL)] == ["dec-prop-0002"]
+        assert [d.id for d in get_verdicts_since(conn, since + timedelta(seconds=1), Verdict.AUTO_EXECUTE)] == []
+        hours = [d.id for d in get_verdicts_since(conn, NOW - timedelta(hours=2), Verdict.NEEDS_APPROVAL)]
+        assert hours == ["dec-prop-0002", "dec-old"]  # newest first; pre_submit rows never listed
+
+    def test_live_approvals_are_approved_and_unexpired(self, conn):
+        decision_id, _ = _seed(conn, verdict=Verdict.NEEDS_APPROVAL)
+        other, _ = _seed(conn, "prop-0002", verdict=Verdict.NEEDS_APPROVAL)
+        third, _ = _seed(conn, "prop-0003", verdict=Verdict.NEEDS_APPROVAL)
+        live = _approve(conn, decision_id)  # expires NOW + 15 min
+        _approve(conn, other, "prop-0002", response=ApprovalResponse.REJECTED)
+        _approve(conn, third, "prop-0003", expires_at=NOW)
+        assert [a.id for a in get_live_approvals(conn, NOW)] == [live.id]
+        assert get_live_approvals(conn, NOW + timedelta(minutes=15)) == []
+
+    @pytest.mark.parametrize("bad", ["2026-07-30", None, 5])
+    def test_bounds_must_be_instants(self, conn, bad):
+        with pytest.raises(StoreError):
+            get_verdicts_since(conn, bad, Verdict.AUTO_EXECUTE)
+        with pytest.raises(StoreError):
+            get_live_approvals(conn, bad)

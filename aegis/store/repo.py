@@ -495,7 +495,9 @@ def record_decision(
     return decision
 
 
-def record_approval(conn: sqlite3.Connection, approval: Approval) -> Approval:
+def record_approval(
+    conn: sqlite3.Connection, approval: Approval, *, event: Event | None = None
+) -> Approval:
     """Insert an approval request, or fill in the response of one already recorded.
 
     Call it when the request goes out and again, with the same id, once it is
@@ -506,7 +508,8 @@ def record_approval(conn: sqlite3.Connection, approval: Approval) -> Approval:
 
     An approval tied to a decision (``decision_id``) is answered once:
     migration 0004 refuses to change an answer already recorded, and allows
-    one approval per decision.
+    one approval per decision. ``event``, when given, is inserted in the same
+    transaction: the answer and its audit event land together or not at all.
     """
     try:
         with transaction(conn):
@@ -532,6 +535,8 @@ def record_approval(conn: sqlite3.Connection, approval: Approval) -> Approval:
                     approval.note,
                 ),
             )
+            if event is not None:
+                _insert_event(conn, event)
             row = conn.execute("SELECT * FROM approvals WHERE id = ?", (approval.id,)).fetchone()
             stored = _row_to_approval(row)
     except _REPO_ERRORS as exc:
@@ -1238,6 +1243,81 @@ def get_decision_approval(conn: sqlite3.Connection, decision_id: str) -> Approva
         return _row_to_approval(row) if row is not None else None
     except _REPO_ERRORS as exc:
         raise StoreError("get decision approval", decision_id, exc) from exc
+
+
+_EXECUTION_OPEN = (
+    OrderStatus.APPROVED.value,
+    OrderStatus.SUBMITTED.value,
+    OrderStatus.PARTIALLY_FILLED.value,
+)
+
+
+def get_execution_orders(conn: sqlite3.Connection, *, open_only: bool = True) -> list[Order]:
+    """The orders written through ``claim_order``, oldest claim first.
+
+    With ``open_only`` (the default), the ones still in play: ``approved``
+    (claimed, maybe not yet acknowledged), ``submitted`` and
+    ``partially_filled``. Rows written before Phase 6 are never listed.
+    """
+    try:
+        if open_only:
+            rows = conn.execute(
+                "SELECT * FROM orders WHERE decision_id IS NOT NULL AND status IN (?, ?, ?)"
+                " ORDER BY submitted_at, rowid",
+                _EXECUTION_OPEN,
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM orders WHERE decision_id IS NOT NULL ORDER BY submitted_at, rowid"
+            ).fetchall()
+        return [_row_to_order(row) for row in rows]
+    except _REPO_ERRORS as exc:
+        raise StoreError("get execution orders", cause=exc) from exc
+
+
+def get_latest_verdict(conn: sqlite3.Connection, proposal_id: str) -> PolicyDecision | None:
+    """The newest ``evaluate`` decision on ``proposal_id`` (by ``decided_at``,
+    then the later insert), or None. A ``pre_submit`` re-check is not a
+    verdict and is never the answer."""
+    try:
+        row = conn.execute(
+            "SELECT * FROM policy_decisions WHERE proposal_id = ? AND purpose = ?"
+            " ORDER BY decided_at DESC, rowid DESC LIMIT 1",
+            (proposal_id, DecisionPurpose.EVALUATE.value),
+        ).fetchone()
+        return _row_to_decision(row) if row is not None else None
+    except _REPO_ERRORS as exc:
+        raise StoreError("get latest verdict", proposal_id, exc) from exc
+
+
+def get_verdicts_since(
+    conn: sqlite3.Connection, since: datetime, verdict: Verdict
+) -> list[PolicyDecision]:
+    """Every ``evaluate`` decision with ``verdict`` decided at or after
+    ``since`` (naive taken as UTC), newest first."""
+    try:
+        rows = conn.execute(
+            "SELECT * FROM policy_decisions WHERE purpose = ? AND verdict = ? AND decided_at >= ?"
+            " ORDER BY decided_at DESC, rowid DESC",
+            (DecisionPurpose.EVALUATE.value, verdict.value, _iso(_utc(since, "since"))),
+        ).fetchall()
+        return [_row_to_decision(row) for row in rows]
+    except _REPO_ERRORS as exc:
+        raise StoreError("get verdicts since", str(since), exc) from exc
+
+
+def get_live_approvals(conn: sqlite3.Connection, now: datetime) -> list[Approval]:
+    """Every approval tied to a decision, answered ``approved`` and not
+    expired at ``now`` (naive taken as UTC), oldest answer first."""
+    try:
+        rows = conn.execute(
+            "SELECT * FROM approvals WHERE decision_id IS NOT NULL AND response = ?"
+            " AND expires_at > ? ORDER BY responded_at, rowid",
+            (ApprovalResponse.APPROVED.value, _iso(_utc(now, "now"))),
+        ).fetchall()
+        return [_row_to_approval(row) for row in rows]
+    except _REPO_ERRORS as exc:
+        raise StoreError("get live approvals", str(now), exc) from exc
 
 
 # --- reads ------------------------------------------------------------------

@@ -2477,5 +2477,6 @@ class TestModule:
         }
         assert defined == {
             "load_proposal", "latest_undecided", "structure_analysis", "build_context",
+            "wall_clock", "trading_day",  # Phase 6: the dispatcher's clock and trading day
         }
         assert all(callable(getattr(context_module, name)) for name in defined)

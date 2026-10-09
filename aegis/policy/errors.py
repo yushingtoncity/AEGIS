@@ -27,3 +27,28 @@ class PolicyError(Exception):
         target = f"{what} for {key}" if key else what
         detail = f" ({type(cause).__name__}: {cause})" if cause is not None else ""
         super().__init__(f"policy failed: {target}{detail}")
+
+
+class PlacementError(PolicyError):
+    """An order could not be placed, cancelled or followed at the broker.
+
+    Raised by ``aegis.policy.dispatch``, which turns every broker failure into
+    one of these, so nothing outside the policy engine ever handles the
+    execution package's own types. ``outcome`` says what the failed call left
+    behind at the broker, in words: ``rejected`` (the broker refused, nothing
+    changed), ``not_sent`` (nothing reached it) or ``unknown`` (it may have
+    taken effect: the order is looked up, never sent again). None for a
+    refusal that never got as far as the broker (an ineligible decision, a
+    claim the store refused).
+    """
+
+    def __init__(
+        self,
+        what: str,
+        key: str | None = None,
+        cause: BaseException | None = None,
+        *,
+        outcome: str | None = None,
+    ) -> None:
+        self.outcome = outcome
+        super().__init__(what, key, cause)

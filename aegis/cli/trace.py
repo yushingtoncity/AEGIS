@@ -32,6 +32,7 @@ from aegis.store.db import MEMORY_DB, connect, resolve_db_path, status
 from aegis.store.errors import StoreError
 from aegis.store.models import (
     Approval,
+    DecisionPurpose,
     Fill,
     Order,
     OrderSide,
@@ -135,8 +136,11 @@ def _print_reasoning(stage: Reasoning) -> None:
 
 
 def _print_decision(decision: PolicyDecision) -> None:
+    # Phase 6: the re-check run just before an order is sent is a decision too
+    recheck = "   pre_submit re-check" if decision.purpose is DecisionPurpose.PRE_SUBMIT else ""
     print(
-        f"{INDENT}{decision.verdict.value}   decided {_ts(decision.decided_at)}   id {decision.id}"
+        f"{INDENT}{decision.verdict.value}   decided {_ts(decision.decided_at)}"
+        f"   id {decision.id}{recheck}"
     )
     print(f"{INDENT * 2}failing rule: {decision.failing_rule or 'none'}")
     print(f"{INDENT * 2}rules evaluated ({len(decision.rules_evaluated)})")
@@ -155,6 +159,9 @@ def _print_approval(approval: Approval) -> None:
     who = f" by {approval.responder}" if approval.responder else ""
     when = _ts(approval.responded_at, "unknown time")
     print(f"{INDENT * 2}response: {approval.response.value}{who} at {when}")
+    if approval.decision_id is not None:  # Phase 6: an answer to one decision
+        until = f", good until {_ts(approval.expires_at)}" if approval.expires_at else ""
+        print(f"{INDENT * 2}answers decision {approval.decision_id}{until}")
 
 
 def _print_order(order: Order, fills: list[Fill]) -> None:
@@ -168,6 +175,19 @@ def _print_order(order: Order, fills: list[Fill]) -> None:
     terms = _terms(order.side, order.quantity, order_type, order.limit_price)
     print(f"{INDENT * 2}{order.symbol}   {terms}")
     print(f"{INDENT * 2}submitted {_ts(order.submitted_at)}   updated {_ts(order.updated_at)}")
+    if order.decision_id is not None:  # Phase 6: placed on a decision, followed at the broker
+        approval = f"   approval {order.approval_id}" if order.approval_id else ""
+        print(
+            f"{INDENT * 2}decision {order.decision_id}   re-check {order.regate_decision_id}{approval}"
+        )
+        average = f" @ {_money(order.avg_fill_price)}" if order.avg_fill_price is not None else ""
+        print(
+            f"{INDENT * 2}filled {_qty(order.filled_quantity)} of {_qty(order.quantity)}{average}"
+            f"   broker status {order.broker_status or 'none'}"
+            f"   synced {_ts(order.last_synced_at, 'never')}"
+        )
+        if order.status_reason:
+            print(f"{INDENT * 2}reason: {order.status_reason}")
     print(f"{INDENT * 2}fills ({len(fills)})")
     if not fills:
         print(f"{INDENT * 3}(none)")

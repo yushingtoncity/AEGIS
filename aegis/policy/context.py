@@ -246,6 +246,21 @@ def _trading_day(market_date: date, zone: ZoneInfo) -> tuple[datetime, datetime]
     return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
 
 
+def wall_clock() -> datetime:
+    """The wall clock, in UTC. Read here because this is the one module of
+    ``aegis.policy`` allowed a clock: the dispatcher takes its "now" from
+    this function (or from the clock a test hands it), never from datetime."""
+    return utcnow()
+
+
+def trading_day(now: datetime, config: AegisConfig) -> tuple[datetime, datetime]:
+    """The trading day ``now`` falls in, as UTC instants ``[start, end)``: the
+    exchange-local calendar day (``pricing.expiry_timezone``) that orders are
+    counted on, the same day ``build_context`` counts ``orders_today`` over."""
+    zone = ZoneInfo(config.pricing.expiry_timezone)
+    return _trading_day(_aware_utc(now).astimezone(zone).date(), zone)
+
+
 def _window_start(anchor: datetime, minutes: int) -> datetime:
     """``anchor`` minus the duplicate window; the beginning of the calendar
     when the window reaches back further than a datetime can."""
