@@ -638,8 +638,9 @@ stderr and exit 1, never a traceback.
 
 ### What the gate does not do
 
-- It places no order. Phase 6 adds the paper Executor; until then every
-  verdict, `AUTO_EXECUTE` included, is a row in `policy_decisions`.
+- It places no order. Phase 6 adds the paper Executor (below); until the
+  dispatcher that calls it lands (PR 6c), every verdict, `AUTO_EXECUTE`
+  included, is a row in `policy_decisions`.
 - It does not reject a quote dated after the context's as-of time. The
   context's clock is read before its quotes are fetched, so a real-time
   quote is routinely a little ahead of it; such a quote counts as fresh, and
@@ -647,6 +648,48 @@ stderr and exit 1, never a traceback.
 - `auto_tier` is exactly the criteria listed in rule 21. It does not ask
   whether figures no rule needed for this proposal (cash, options buying
   power on an equity order) could be read.
+
+## Execution (Phase 6)
+
+`aegis/execution` is the broker boundary. Nothing calls it yet: PR 6c adds
+the dispatcher in `aegis/policy` (the only package allowed to hold an
+Executor) and the `orders` CLI. What is here:
+
+- **`models.py`.** `ApprovedOrder` is the only thing an Executor sends. It
+  names the decision that authorised it, the `pre_submit` re-check it
+  passed and the approval it rests on, and its shape is the Phase 6 scope:
+  one LIMIT order, good for the DAY, on an equity or a single option
+  contract, a whole number of shares or contracts, a price with at most 4
+  decimals. An option order needs a human approval (spec D6). A market
+  order, multi-leg order, GTC order or free text from the proposal cannot
+  be built. The client order id is always `aegis-<proposal_id>`.
+  `OrderReceipt` is the broker's word on an order, stamped `fetched_at`.
+  `ExecutionError` says what a failed call left behind: `rejected` (the
+  broker refused, nothing changed), `not_sent` (nothing left the process),
+  or `unknown` (it may have landed: look it up, never resend).
+- **`base.py`.** The typed `Executor` interface: `submit_order`,
+  `cancel_order`, `close_position`, and two reads, `get_open_orders` and
+  `get_order` (by client order id).
+- **`paper.py`.** `PaperExecutor` over the Alpaca paper account, with its
+  own client from `paper_trading_client`, hardened before any request:
+  the paper host only (its HTTP session refuses any other), alpaca-py's
+  automatic retries off (a retried 429 could send one order twice), a
+  timeout on every request (alpaca-py sets none), and raw JSON answers read
+  into `OrderReceipt`. Before it sends anything, `submit_order` checks the
+  order against the store: the row `claim_order` wrote must exist, match
+  field for field, be unsent and never looked up, and the kill switch and
+  halt are read again. Anything off is `not_sent`, with no request at all.
+  Nothing retries. Alpaca's statuses map to the store's: `filled`;
+  `canceled`/`expired` are cancelled; `rejected` is failed; every other
+  word, including one Alpaca adds later, stays open and counted.
+
+`tests/test_policy_architecture.py` gained rule (g) for this phase (spec
+D8): no module outside `aegis/execution`, the policy engine included, may
+name Alpaca's other order calls (`cancel_order_by_id`, `cancel_orders`,
+`replace_order_by_id`, `close_all_positions`, `exercise_options_position`).
+The list is pinned against every order-writing method alpaca-py's
+`TradingClient` has, and the executor itself names only
+`cancel_order_by_id`.
 
 ## Repo layout
 
@@ -659,10 +702,10 @@ aegis/
   store/             SQLite audit log: models, db + migrations/, typed repo
   brain/             scan -> thesis -> proposal: llm client, prompts/, snapshot, stages, cycle
   policy/            the deterministic gate: models, context, measures, rules, engine, limits
-  execution/base.py  abstract Executor interface (no implementation yet)
+  execution/         the broker boundary: base (the Executor interface), models, paper (PaperExecutor)
   cli/               operator tools: check, snapshot, db, trace, brain, policy
   notify/ dashboard/ stubs for later phases
-tests/               config, cache, model-parsing, pricing, position, store, brain and policy tests (canned JSON, FakeLLM, hand-built contexts, tmp_path DBs)
+tests/               config, cache, model-parsing, pricing, position, store, brain, policy and execution tests (canned JSON, FakeLLM, fake broker clients, hand-built contexts, tmp_path DBs)
 docs/phase5/         working documents of the policy-engine phase: spec, decisions, review rulings
 docs/phase5_1/       the Phase 5.1 follow-ups: what changed, why, and the evidence
 docs/phase6/         the Phase 6 spec: decisions, flow, and the 6a/6b/6c breakdown

@@ -13,10 +13,11 @@ from aegis.data.errors import DataError
 
 # alpaca-py still imports ``websockets.legacy``, which websockets 14+
 # deprecates at import time. That warning is the dependency's to act on, not
-# ours, and every module that reaches Alpaca lives under this package — so it
-# is silenced here, once, before any of them is imported, and a
-# ``python -W error`` run of anything that touches the data layer stays
-# clean. Nothing else is filtered.
+# ours, and every module that reaches Alpaca lives under this package — or,
+# for ``aegis.execution.paper``, imports it before Alpaca — so it is silenced
+# here, once, before any of them is imported, and a ``python -W error`` run
+# of anything that touches the data layer stays clean. Nothing else is
+# filtered.
 warnings.filterwarnings(
     "ignore", message="websockets.legacy is deprecated", category=DeprecationWarning
 )

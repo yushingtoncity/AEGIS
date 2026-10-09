@@ -77,9 +77,21 @@ f. No name of the Executor interface's order methods — ``submit_order``,
    ``cancel_order``, ``close_position`` — as an identifier of any kind (a
    call on whatever was handed over, a definition, an argument, an imported
    name) or inside a string or bytes literal (docstrings aside;
-   concatenations and f-strings read as in rule (c)). ``get_open_orders``
-   belongs to the interface too, but it is also a function of the store,
-   which outside modules call: it is not on the list.
+   concatenations and f-strings read as in rule (c)). The interface's two
+   reads, ``get_open_orders`` and ``get_order``, are also functions of the
+   store, which outside modules call: they are not on the list.
+g. No name of Alpaca's own order calls beyond the interface's —
+   ``replace_order_by_id``, ``cancel_order_by_id``, ``cancel_orders``,
+   ``close_all_positions``, ``exercise_options_position`` — read as rule (f)
+   reads its names, and in ``aegis/policy`` too: only ``aegis/execution``
+   may name them (spec decision D8). The data layer's trading client can
+   reach every one of them, and the Executor is the only road an order may
+   take to the broker. The list is pinned against alpaca-py: every
+   ``TradingClient`` method that writes to ``/orders`` or ``/positions`` is
+   on it or on rule (f)'s, so a call a later release adds fails until it is
+   listed. And the executor itself names only the one it needs
+   (``cancel_order_by_id``): no bulk cancel, replace, flatten-all or
+   exercise anywhere in the tree.
 
 PART 2 — ``aegis/policy`` is pure, deterministic Python; no model calls.
 Every ``.py`` under ``aegis/policy``:
@@ -195,9 +207,20 @@ to one."""
 EXECUTION_NAME = EXECUTION.rpartition(".")[2]
 """``execution``: what the package is called on whatever holds it."""
 ORDER_METHODS = frozenset({"submit_order", "cancel_order", "close_position"})
-"""The Executor interface's order methods — what rule (f) reads for.
-``get_open_orders`` is the interface's fourth method and deliberately absent:
-``aegis.store.repo`` has a function of that name, which outside modules call."""
+"""The Executor interface's order methods — what rule (f) reads for."""
+BROKER_ORDER_CALLS = frozenset(
+    {
+        "replace_order_by_id", "cancel_order_by_id", "cancel_orders", "close_all_positions",
+        "exercise_options_position",
+    }
+)
+"""Alpaca's order calls that are not the interface's own names — what rule
+(g) reads for. (``submit_order`` and ``close_position`` are both: rule (f)
+keeps them out of every outside module already.)"""
+INTERFACE_READS = frozenset({"get_open_orders", "get_order"})
+"""The Executor interface's other methods, deliberately absent from rule (f):
+each is a read that changes nothing at the broker, and ``aegis.store.repo``
+has a function of the same name, which outside modules call."""
 
 COMPUTED_IMPORT = "<computed import>"
 """Recorded for an ``import_module`` / ``__import__`` whose target cannot be
@@ -548,6 +571,17 @@ def order_methods(source: str) -> set[str]:
     found = {name for name in _identifiers(tree) if name in ORDER_METHODS}
     for text in _literal_texts(tree):
         found.update(method for method in ORDER_METHODS if method in text)
+    return found
+
+
+def broker_order_calls(source: str) -> set[str]:
+    """Rule (g): every one of Alpaca's own order calls (``BROKER_ORDER_CALLS``)
+    that ``source`` names, read exactly as rule (f) reads its names. Empty
+    when clean."""
+    tree = ast.parse(source)
+    found = {name for name in _identifiers(tree) if name in BROKER_ORDER_CALLS}
+    for text in _literal_texts(tree):
+        found.update(call for call in BROKER_ORDER_CALLS if call in text)
     return found
 
 
@@ -1227,10 +1261,12 @@ class TestOrderMethodChecker:
             '"""Never submit_order, cancel_order or close_position: the engine alone."""',
             'def f():\n    """Hands nothing to submit_order."""\n    return 1',
             "# venue.submit_order(order)",
-            # the interface's fourth method is the store's function too: not on the list
+            # the interface's two reads are the store's functions too: not on the list
             "rows = repo.get_open_orders(conn)",
             "from aegis.store.repo import get_open_orders",
             "name = 'get_open_orders'",
+            "order = repo.get_order(conn, client_order_id)",
+            "from aegis.store.repo import get_order",
             # an identifier is read whole
             "orders = submit_orders(batch)",
             "venue.cancel_orders()",
@@ -1250,9 +1286,10 @@ class TestOrderMethodChecker:
 
     def test_the_list_is_the_interfaces_order_methods(self):
         """Rule (f) reads for what the Executor interface really declares:
-        every method of the abstract class is on the list but the one the
-        store shares — so a method Phase 6 adds fails here until it is put
-        on the list, or named beside ``get_open_orders``."""
+        every method of the abstract class is on the list but the reads the
+        store shares — so a method added later fails here until it is put
+        on the list, or named beside ``get_open_orders`` and ``get_order``
+        as a read the store defines too."""
 
         def functions(nodes):
             kinds = (ast.FunctionDef, ast.AsyncFunctionDef)
@@ -1268,11 +1305,79 @@ class TestOrderMethodChecker:
         declared = functions(interface[0].body)
         assert ORDER_METHODS == {"submit_order", "cancel_order", "close_position"}
         assert ORDER_METHODS <= declared
-        assert declared - ORDER_METHODS == {"get_open_orders"}
-        # ... which the store really defines, so no outside module could be told not to name it
+        assert INTERFACE_READS == {"get_open_orders", "get_order"}
+        assert declared - ORDER_METHODS == INTERFACE_READS
+        # ... which the store really defines, so no outside module could be told not to name them
         store = ast.parse(_source(AEGIS_DIR / "store" / "repo.py"))
-        assert "get_open_orders" in functions(ast.walk(store))
+        assert INTERFACE_READS <= functions(ast.walk(store))
         assert not ORDER_METHODS & functions(ast.walk(store))
+
+
+class TestBrokerOrderCallChecker:
+    @pytest.mark.parametrize(
+        "snippet, calls",
+        [
+            ("client.cancel_order_by_id(order_id)", {"cancel_order_by_id"}),
+            ("trading_client().cancel_orders()", {"cancel_orders"}),
+            ("client.replace_order_by_id(order_id, request)", {"replace_order_by_id"}),
+            ("client.close_all_positions(cancel_orders=True)",
+             {"close_all_positions", "cancel_orders"}),
+            ("exercise = client.exercise_options_position", {"exercise_options_position"}),
+            ("def cancel_orders(): ...", {"cancel_orders"}),
+            ("def run(cancel_order_by_id): ...", {"cancel_order_by_id"}),
+            ("from alpaca.trading.client import TradingClient\n"
+             "flatten = TradingClient.close_all_positions", {"close_all_positions"}),
+            ("from somewhere import stop as cancel_orders", {"cancel_orders"}),
+            ("stop = getattr(client, 'cancel_' + 'orders')", {"cancel_orders"}),
+            ("stop = getattr(client, f'cancel_order_{\"by_id\"}')", {"cancel_order_by_id"}),
+            ("name = b'exercise_options_position'", {"exercise_options_position"}),
+            ("__all__ = ['replace_order_by_id']", {"replace_order_by_id"}),
+            ("note = 'then cancel_orders, then close_all_positions'",
+             {"cancel_orders", "close_all_positions"}),
+        ],
+    )
+    def test_catches_every_way_a_broker_order_call_is_named(self, snippet, calls):
+        assert broker_order_calls(snippet) == calls, snippet
+
+    @pytest.mark.parametrize(
+        "snippet",
+        [
+            '"""Never cancel_orders or close_all_positions here."""',
+            "# client.cancel_orders()",
+            # the reads, and the interface's own names (rule (f)'s business)
+            "orders = client.get_orders(request)",
+            "order = client.get_order_by_id(order_id)",
+            "order = client.get_order_by_client_id(name)",
+            "venue.cancel_order(order_id)",
+            "venue.close_position('SPY')",
+            # an identifier is read whole
+            "cancel_orders_report = build()",
+            "def _exercise_options_position_note(): ...",
+            "stop = getattr(client, 'cancel_' + suffix)",
+        ],
+    )
+    def test_does_not_flag_reads_the_interface_or_look_alikes(self, snippet):
+        assert broker_order_calls(snippet) == set(), snippet
+
+    def test_the_list_is_every_order_write_alpaca_py_has(self):
+        """Every public ``TradingClient`` method whose body posts, patches or
+        deletes under ``/orders`` or ``/positions`` is on rule (g)'s list or
+        rule (f)'s, and nothing else is: a write alpaca-py adds later fails
+        here until it is listed."""
+        import re
+
+        from aegis import data  # noqa: F401  (first: it silences alpaca-py's websockets warning)
+        from alpaca.trading.client import TradingClient
+
+        writes = re.compile(r'self\.(post|patch|delete)\(\s*f?"/(orders|positions)')
+        found = {
+            name
+            for name, member in inspect.getmembers(TradingClient, inspect.isfunction)
+            if not name.startswith("_") and writes.search(inspect.getsource(member))
+        }
+        assert found == BROKER_ORDER_CALLS | {"submit_order", "close_position"}
+        assert {"submit_order", "close_position"} <= ORDER_METHODS
+        assert not BROKER_ORDER_CALLS & ORDER_METHODS
 
 
 class TestExecutionAttributeChecker:
@@ -1845,6 +1950,20 @@ class TestOnlyPolicyMayReferenceAnExecutor:
     def test_no_module_outside_policy_names_an_order_method(self, path):
         found = order_methods(_source(path))
         assert found == set(), f"{_id(path)} names {sorted(found)}"
+
+    @pytest.mark.parametrize("path", OUTSIDE_SOURCES + POLICY_SOURCES, ids=_id)
+    def test_no_module_outside_execution_names_a_broker_order_call(self, path):
+        found = broker_order_calls(_source(path))
+        assert found == set(), f"{_id(path)} names {sorted(found)}"
+
+    def test_the_executor_names_only_the_broker_order_call_it_needs(self):
+        """Rule (g) has a real target, and the executor itself stays narrow:
+        it cancels one order by its id, and names no bulk cancel, replace,
+        flatten-all or exercise."""
+        assert broker_order_calls(_source(EXECUTION_DIR / "paper.py")) == {"cancel_order_by_id"}
+        for path in _sources(EXECUTION_DIR):
+            if path.name != "paper.py":
+                assert broker_order_calls(_source(path)) == set(), _id(path)
 
     def test_the_package_rule_reads_a_real_binding(self):
         """Rule (e) is not silent because it reads nothing: this very file —
