@@ -734,10 +734,20 @@ broker never acknowledged and still does not know after
 `broker.not_found_grace_seconds` (120) is marked cancelled, and still
 counts toward the daily cap. An order open at the broker that the store does
 not hold open (one placed by hand in the Alpaca dashboard, say) is an
-orphan: a CRITICAL event, and the kill switch goes on. `stand-down` cancels
+orphan: a CRITICAL event, and the kill switch goes on. AEGIS does not
+cancel an orphan (it does not know whose it is): cancel it in the Alpaca
+dashboard, then `policy kill off`. `stand-down` cancels
 every working order while the kill switch is on, a halt is in force, or
 the halt cannot be read; it never flattens a position. `policy kill on`
 itself only sets the switch: run `orders stand-down` (or `tick`) after it.
+
+`policy kill on` says how many orders are still working: the switch stops
+new orders, and `stand-down` cancels the working ones. `tick` places
+nothing while the controls say stop, or when it could not fully read the
+broker, and exits 1 whenever the broker refused, never received or may
+have received an order. Equity limits must be whole cents at $1 and above
+(the broker refuses sub-penny prices there), and such a proposal is refused
+before anything is recorded.
 
 `sync`, `cancel` and `stand-down` work with placing off, so turning it off
 never strands an order that is already working. Every step is an event and

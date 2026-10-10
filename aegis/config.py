@@ -20,6 +20,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     ValidationError,
     field_validator,
     model_validator,
@@ -312,7 +313,7 @@ class BrokerConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
-    enabled: bool = False
+    enabled: StrictBool = False  # a real true/false: no quoted string or number turns placing on
     kind: Literal["paper"] = "paper"
     http_timeout_seconds: float = Field(default=10.0, gt=0)
     max_decision_age_seconds: float = Field(default=300.0, gt=0)

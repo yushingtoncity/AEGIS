@@ -189,6 +189,17 @@ As built:
   `unknown_outcome`, which the executor will never send again.
 - The trace CLI labels `pre_submit` decisions and shows an order's decision
   links, fills, broker status and reason.
+- From the 6c review: `policy kill on` prints the D4 hint with the number
+  of working orders; `tick` counts any placement that reached (or may
+  have reached) the broker without a receipt as a failure, and places
+  nothing when sync or stand-down could not resolve everything; an equity
+  limit finer than a cent at $1 or more is refused before the re-check;
+  a refusal after the re-check writes an `order_refused` event;
+  `broker.enabled` is a strict boolean.
+- Semantics worth knowing: the decision-age gate (D1) is read when `place`
+  starts, before the seconds-long re-check; the approval's expiry is read
+  then and again inside the claim. An orphan is reported and the kill
+  switch set, but not cancelled: whose order it is, AEGIS cannot know.
 
 ## Live checks for the mini (before 6c merges)
 
