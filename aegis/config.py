@@ -320,6 +320,45 @@ class BrokerConfig(BaseModel):
     not_found_grace_seconds: float = Field(default=120.0, ge=0)
 
 
+class NotifyConfig(BaseModel):
+    """Phase 7: telling the operator what happened, from the store's events.
+
+    Shipped with ``enabled: false``: ``notify send`` refuses until the
+    operator turns it on, on the mini, with the channel's address in .env
+    (never here). An event is sent when its level is at least ``min_level``
+    or its kind is listed in ``kinds``, unless its kind is in
+    ``ignore_kinds``; each is sent once, retried at most ``max_attempts``
+    times while it is younger than ``lookback_minutes``.
+    The notifier only reads the trading tables: it writes nothing but its
+    own ``notify_*`` events, and nothing here changes what may be traded.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+
+    enabled: bool = False
+    channel: Literal["imessage", "slack", "ntfy"] = "imessage"
+    timeout_seconds: float = Field(default=10.0, gt=0)
+    min_level: Literal["debug", "info", "warning", "error", "critical"] = "warning"
+    kinds: tuple[str, ...] = (
+        "policy_needs_approval",
+        "approval_answered",
+        "order_submitted",
+        "order_updated",
+    )
+    ignore_kinds: tuple[str, ...] = ("policy_reject",)
+    lookback_minutes: float = Field(default=60.0, gt=0)
+    max_attempts: int = Field(default=3, ge=1)
+    max_per_run: int = Field(default=20, ge=1)
+
+    @field_validator("kinds", "ignore_kinds")
+    @classmethod
+    def _clean_kinds(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        cleaned = tuple(kind.strip() for kind in value)
+        if any(not kind for kind in cleaned):
+            raise ValueError("an event kind must not be blank")
+        return cleaned
+
+
 class AegisConfig(BaseModel):
     """The validated contents of config.yaml."""
 
@@ -333,6 +372,7 @@ class AegisConfig(BaseModel):
     brain: BrainConfig = BrainConfig()
     risk_limits: RiskLimits = RiskLimits()
     broker: BrokerConfig = BrokerConfig()
+    notify: NotifyConfig = NotifyConfig()
 
     @field_validator("watchlist")
     @classmethod

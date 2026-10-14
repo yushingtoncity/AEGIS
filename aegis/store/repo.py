@@ -1493,6 +1493,35 @@ def get_recent_events(
         raise StoreError("get recent events", level.value if level else None, exc) from exc
 
 
+def get_events_since(
+    conn: sqlite3.Connection, since: datetime, *, kind: str | None = None
+) -> list[Event]:
+    """Every event that occurred at or after ``since`` (naive taken as UTC),
+    oldest first, optionally only one ``kind``.
+
+    What the Phase 7 notifier reads: the events still worth telling the
+    operator about, and its own ``notify_sent`` / ``notify_failed`` records
+    of what it already told them. The bound is inclusive; ties on
+    ``occurred_at`` break on rowid, the earlier insert first.
+    """
+    bound = _iso(_utc(since, "since"))
+    try:
+        if kind is None:
+            rows = conn.execute(
+                "SELECT * FROM events WHERE occurred_at >= ? ORDER BY occurred_at, rowid",
+                (bound,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM events WHERE occurred_at >= ? AND kind = ?"
+                " ORDER BY occurred_at, rowid",
+                (bound, kind),
+            ).fetchall()
+        return [_row_to_event(row) for row in rows]
+    except _REPO_ERRORS as exc:
+        raise StoreError("get events since", str(since), exc) from exc
+
+
 def _shown(value: object) -> str:
     """A stored value as a ``problems`` line quotes it: its repr (so control
     characters arrive escaped), cut to ``_SHOWN_MAX`` characters."""

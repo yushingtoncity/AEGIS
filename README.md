@@ -744,6 +744,61 @@ never strands an order that is already working. Every step is an event and
 a row in the store, and `python -m aegis.cli.trace PROPOSAL_ID` shows the
 re-check, the approval, the order and its fills.
 
+## Notifications (Phase 7)
+
+`aegis/notify` tells you what happened, by default as an iMessage from the
+mini to your phone. It reads the store's `events` table, which the brain,
+the policy engine and the dispatcher already write, so it sees every
+verdict that needs you, every order and fill, and every warning, error and
+critical event. It is not part of the order path: it loads no policy
+engine, broker package or brain, and the only rows it writes are its own
+`notify_sent` / `notify_failed` events (through `repo.log_event`), which
+are how it remembers what already went out. No schema change.
+
+```bash
+python -m aegis.cli.notify test       # one test notice; needs the channel's address in .env, no database
+python -m aegis.cli.notify pending    # what a send would send now; writes nothing
+python -m aegis.cli.notify send       # send what is due and record each attempt
+```
+
+Three channels, picked by `notify.channel`, each with its address in `.env`:
+
+- **`imessage`** (default): Messages on the mini texts `IMESSAGE_TO` (a
+  phone number or Apple ID email) through `osascript`. macOS only. The
+  AppleScript is a constant and the recipient and text reach it as
+  arguments, so no stored text can become script. Messages must be signed
+  in to iMessage, and the first run asks once for permission to control it.
+  A text sent to the same Apple ID the mini is signed in with may arrive
+  without an alert, so give the mini's Messages its own Apple ID if you can.
+- **`slack`**: an incoming webhook, `SLACK_WEBHOOK_URL`
+  (`https://hooks.slack.com/services/...`; it is a credential).
+- **`ntfy`**: a push to the ntfy app, `NTFY_TOPIC_URL` (anyone who knows
+  the topic can read it; `NTFY_TOKEN` is for a server that needs one).
+
+The two web channels speak HTTPS only and follow no redirects. Every send
+times out after `timeout_seconds`, and no error ever prints the address.
+
+What goes out is set in the `notify:` block of config.yaml: every event at
+or above `min_level` (warning), plus the kinds listed in `kinds` whatever
+their level (a verdict waiting on approval, an approval answered, an order
+at the broker, an order update), except the kinds in `ignore_kinds`
+(`policy_reject`: a turned-down proposal is the gate working, and a text
+every brain cycle would bury the ones that matter). An approval notice
+carries the exact `orders approve` command. Each event is sent once per
+channel; a failed send is retried on the next run, up to `max_attempts`,
+while the event is younger than `lookback_minutes`, so a first run never
+replays history. A run sends at most `max_per_run`, oldest first. The
+notifier never sends its own `notify_*` events, so a broken channel cannot
+feed itself. If the process dies between a send and its record, the next
+run sends it again: a duplicate, never a lost notice.
+
+Setup, on the mini: put the channel's address in `.env`, run `notify test`,
+then set `notify.enabled: true`. Shipped off: `send` refuses until then,
+while `pending` and `test` work either way. Until the Phase 9 daemon runs
+`send` after each tick, run it by hand or from cron, every 5 minutes or
+slower: a run can take `max_per_run` x `timeout_seconds` at worst, and two
+runs at once can send the same notice twice.
+
 ## Repo layout
 
 ```
@@ -756,8 +811,9 @@ aegis/
   brain/             scan -> thesis -> proposal: llm client, prompts/, snapshot, stages, cycle
   policy/            the deterministic gate: models, context, measures, rules, engine, limits
   execution/         the broker boundary: base (the Executor interface), models, paper (PaperExecutor)
-  cli/               operator tools: check, snapshot, db, trace, brain, policy, orders
-  notify/ dashboard/ stubs for later phases
+  cli/               operator tools: check, snapshot, db, trace, brain, policy, orders, notify
+  notify/            Phase 7 notifications: outbox (what is due, sent once), imessage / slack / ntfy
+  dashboard/         stub for Phase 8
 tests/               config, cache, model-parsing, pricing, position, store, brain, policy and execution tests (canned JSON, FakeLLM, fake broker clients, hand-built contexts, tmp_path DBs)
 docs/phase5/         working documents of the policy-engine phase: spec, decisions, review rulings
 docs/phase5_1/       the Phase 5.1 follow-ups: what changed, why, and the evidence
@@ -775,7 +831,7 @@ docs/phase6/         the Phase 6 spec: decisions, flow, and the 6a/6b/6c breakdo
 | 5     | Policy engine: deterministic gate enforcing risk_limits |
 | 5.1   | Expiry floor for the brain's chains, and the quote-age rule (this) |
 | 6     | Execution: paper broker behind the Executor interface |
-| 7     | Notifications |
+| 7     | Notifications: iMessage, Slack or ntfy, from the event log |
 | 8     | Dashboard |
 | 9     | Daemon: scheduled autonomous loop |
 | 10    | Paper campaign: supervised live-paper trading run |
