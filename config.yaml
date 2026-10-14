@@ -57,32 +57,48 @@ brain:
   # One model per stage. temperature is deliberately absent: the current
   # Messages API / anthropic 1.x SDK does not accept it for these models (400);
   # effort (low|medium|high|xhigh|max) is the knob, and Haiku 4.5 takes none.
-  # Thinking is always on for Opus 5.5 / Fable 5.1 and its tokens count
-  # toward max_tokens, so keep effort modest where max_tokens is small.
+  # Thinking is always on for the 5.x models and its tokens count toward
+  # max_tokens, so keep effort modest where max_tokens is small.
+  #
+  # track (haiku|sonnet|opus|fable|null): follow that family's newest model.
+  # Each cycle reads the Models API list once and calls the highest version of
+  # the family (claude-opus-5-5 today, claude-opus-6 the day it ships). model
+  # is then the pinned FALLBACK, used if the list call fails or finds nothing;
+  # every cycle logs a model_selection event saying which model each stage got
+  # and why. Set track: null to pin a stage to model exactly.
   stages:
     scan:
-      model: claude-haiku-4-5-20251001
-      # Measured 2026-09-24: a terse five-symbol brief (scan-v2) needs ~1,700
-      # output tokens; 1,500 truncated it. Scale with the watchlist size.
-      max_tokens: 3000
-      effort: null
+      model: claude-haiku-5-5
+      track: haiku
+      # Measured 2026-09-24 on Haiku 4.5: a terse five-symbol brief (scan-v2)
+      # needs ~1,700 output tokens; 1,500 truncated it. Haiku 5.5 thinks by
+      # default and its thinking counts here, so effort is low and the cap is
+      # 4,000. PLACEHOLDER until the first Haiku 5.5 cycles are measured.
+      max_tokens: 4000
+      effort: low
     thesis:
       model: claude-opus-5-5
+      track: opus
       # Measured 2026-09-24: one candidate on a two-symbol snapshot took 1,210
       # tokens (thinking + JSON); up to five candidates need headroom.
       max_tokens: 4000
       effort: medium
     proposal:
       model: claude-fable-5-1
+      track: fable
       # Measured 2026-09-24: 800 truncated — thinking used ~670 before the
       # ~500-token proposal JSON began.
       max_tokens: 3000
       effort: low
 
-  # PLACEHOLDERS for cost ESTIMATES only (USD per million tokens). Update from
-  # the official pricing page: https://platform.claude.com/docs/en/about-claude/pricing
+  # PLACEHOLDERS for cost ESTIMATES only (USD per million tokens), checked
+  # 2026-10-14 against https://platform.claude.com/docs/en/about-claude/pricing.
+  # A model a tracked stage moves to before it has a line here makes the
+  # estimate n/a (the token budget still applies), so add it when it ships.
   prices_per_mtok:
+    claude-haiku-5-5: {input: 0.10, output: 0.50}   # prompts up to 100K tokens
     claude-haiku-4-5-20251001: {input: 1.00, output: 5.00}
+    claude-sonnet-5-5: {input: 2.00, output: 10.00}
     claude-opus-5-5: {input: 4.00, output: 20.00}
     claude-fable-5-1: {input: 10.00, output: 50.00}
 

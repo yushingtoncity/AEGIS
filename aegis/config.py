@@ -132,6 +132,7 @@ class StoreConfig(BaseModel):
 
 
 _EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+MODEL_FAMILIES = ("haiku", "sonnet", "opus", "fable")
 
 
 class BrainStageConfig(BaseModel):
@@ -141,6 +142,11 @@ class BrainStageConfig(BaseModel):
     the 5.x models and counts toward ``max_tokens``); ``None`` omits it,
     which Haiku 4.5 requires. There is no ``temperature``: the Messages API
     no longer accepts sampling parameters for these models.
+
+    ``track`` names a model family (haiku, sonnet, opus, fable) whose newest
+    model the stage follows: ``aegis.brain.model_choice`` looks it up at the
+    start of every cycle. ``model`` is then the pinned fallback, used when
+    the lookup fails or finds nothing. ``None`` pins the stage to ``model``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -148,6 +154,7 @@ class BrainStageConfig(BaseModel):
     model: str
     max_tokens: int = Field(gt=0)
     effort: str | None = None
+    track: str | None = None
 
     @field_validator("model")
     @classmethod
@@ -161,6 +168,13 @@ class BrainStageConfig(BaseModel):
     def _valid_effort(cls, value: str | None) -> str | None:
         if value is not None and value not in _EFFORT_LEVELS:
             raise ValueError(f"effort must be one of {_EFFORT_LEVELS} or null, got {value!r}")
+        return value
+
+    @field_validator("track")
+    @classmethod
+    def _valid_track(cls, value: str | None) -> str | None:
+        if value is not None and value not in MODEL_FAMILIES:
+            raise ValueError(f"track must be one of {MODEL_FAMILIES} or null, got {value!r}")
         return value
 
 

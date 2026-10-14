@@ -63,6 +63,7 @@ from typing import Any
 
 from aegis.brain.errors import BrainError, BudgetExceeded
 from aegis.brain.llm import BudgetGuard, GuardedLLM, LLMClient, LLMResponseError, estimate_cost
+from aegis.brain.model_choice import ModelChoice, apply_choices, resolve_models
 from aegis.brain.models import (
     CycleOutcome,
     CycleResult,
@@ -268,6 +269,30 @@ def _cycle_event(
     kind: str, message: str, payload: dict[str, Any], level: EventLevel = EventLevel.INFO
 ) -> Event:
     return Event(level=level, kind=kind, message=message, payload=payload)
+
+
+def model_selection_event(cycle_id: str, choices: Sequence[ModelChoice]) -> Event:
+    """The ``model_selection`` event: which model each stage calls this
+    cycle and why (``pinned``, ``latest`` of its tracked family, or
+    ``fallback`` to the pin). WARNING when a tracked stage fell back."""
+    fell_back = [c for c in choices if c.source == "fallback"]
+    summary = ", ".join(f"{c.stage} {c.model} ({c.source})" for c in choices)
+    return _cycle_event(
+        "model_selection",
+        f"cycle {cycle_id} models: {summary}",
+        {"cycle_id": cycle_id, "stages": [c.model_dump(mode="json") for c in choices]},
+        level=EventLevel.WARNING if fell_back else EventLevel.INFO,
+    )
+
+
+def select_models(
+    conn: sqlite3.Connection, llm: LLMClient, config: AegisConfig, cycle_id: str
+) -> AegisConfig:
+    """Resolve each stage's model (``aegis.brain.model_choice``), journal the
+    choice, and return the config the cycle runs on."""
+    choices = resolve_models(llm, config.brain)
+    log_event(conn, model_selection_event(cycle_id, choices))
+    return config.model_copy(update={"brain": apply_choices(config.brain, choices)})
 
 
 def brain_error_event(cycle_id: str, stage: ReasoningStage | None, exc: BaseException) -> Event:
@@ -512,6 +537,7 @@ def run_cycle(
         ),
     )
 
+    config = select_models(conn, llm, config, cycle_id)
     ledger = _Ledger()
     guard = BudgetGuard(conn, config.brain, cycle_id)
     guarded = GuardedLLM(llm, guard)

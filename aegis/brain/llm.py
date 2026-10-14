@@ -49,6 +49,7 @@ import re
 import sqlite3
 import time
 from collections.abc import Callable, Iterable, Mapping
+from datetime import datetime
 from typing import Any, Literal, Protocol
 
 import anthropic
@@ -119,6 +120,13 @@ class LLMResponse(Frozen):
 
 class LLMClient(Protocol):
     def complete(self, request: LLMRequest) -> LLMResponse: ...
+
+
+class ListedModel(Frozen):
+    """One entry of the Models API list: its id and when it was released."""
+
+    id: str
+    created_at: datetime
 
 
 class LLMResponseError(BrainError):
@@ -197,6 +205,21 @@ class AnthropicLLM:
     @property
     def max_retries(self) -> int:
         return self._max_retries
+
+    def list_models(self) -> tuple[ListedModel, ...]:
+        """Every model the API key can call (``GET /v1/models``, auto-paginated).
+
+        Read by ``aegis.brain.model_choice`` to find each tracked family's
+        newest model. Any API error is a ``BrainError``; the caller falls
+        back to the pinned models.
+        """
+        try:
+            return tuple(
+                ListedModel(id=str(model.id), created_at=model.created_at)
+                for model in self._client.models.list()
+            )
+        except anthropic.APIError as exc:
+            raise BrainError("model list", None, exc) from exc
 
     def _backoff_seconds(self, exc: BaseException, attempt_index: int) -> float:
         """How long to wait after the ``attempt_index``-th (0-based) failed attempt."""
