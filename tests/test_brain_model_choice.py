@@ -222,9 +222,9 @@ class TestCycleUsesTheChoice:
 
 
 class TestConfig:
-    def test_shipped_config_tracks_haiku_opus_and_fable(self):
+    def test_shipped_config_tracks_haiku_for_scan_and_opus_for_thesis_and_proposal(self):
         stages = get_config().brain.stages
-        assert (stages.scan.track, stages.thesis.track, stages.proposal.track) == ("haiku", "opus", "fable")
+        assert (stages.scan.track, stages.thesis.track, stages.proposal.track) == ("haiku", "opus", "opus")
 
     def test_an_unknown_family_is_rejected(self):
         with pytest.raises(ValueError, match="track must be one of"):

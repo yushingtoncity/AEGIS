@@ -84,8 +84,12 @@ brain:
       max_tokens: 4000
       effort: medium
     proposal:
-      model: claude-fable-5-1
-      track: fable
+      # Opus, not Fable, until the proposal scorecard shows Fable's ~2.5x
+      # price buys better proposals (decided 2026-10-14). The thesis stage
+      # has already picked the idea and the policy engine checks every
+      # number; to try Fable again set model: claude-fable-5-1, track: fable.
+      model: claude-opus-5-5
+      track: opus
       # Measured 2026-09-24: 800 truncated — thinking used ~670 before the
       # ~500-token proposal JSON began.
       max_tokens: 3000

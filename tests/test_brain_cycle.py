@@ -1329,7 +1329,9 @@ class TestCliUsage:
             cost = _event(conn, "cycle_end").payload["estimated_cost_usd"]
         finally:
             conn.close()
-        assert len(models) == 3 and any(model not in config.brain.prices_per_mtok for model in models)
+        configured = {config.brain.stage(stage.value).model for stage in STAGES}
+        assert models == {f"{model}-20260301" for model in configured}
+        assert any(model not in config.brain.prices_per_mtok for model in models)
         assert cost is not None and cost > 0  # once priced the requested (configured) models
         assert cli_brain.main(["usage", "--db", str(db_path)]) == 0
         lines = capsys.readouterr().out.splitlines()
