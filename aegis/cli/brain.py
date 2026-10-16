@@ -62,6 +62,7 @@ from aegis.brain.cycle import (
     market_snapshot_event,
     reasoning_row,
     run_cycle,
+    select_models,
     snapshot_from_event,
 )
 from aegis.brain.errors import BrainError, BudgetExceeded
@@ -376,9 +377,9 @@ class _StageRun:
         prior_cycle: str | None,
     ) -> None:
         self.conn = conn
-        self.config = config
         self.prior_cycle = prior_cycle
         self.cycle_id = new_id()
+        self.config = config = select_models(conn, llm, config, self.cycle_id)
         self.guard = BudgetGuard(conn, config.brain, self.cycle_id)
         self.llm = GuardedLLM(llm, self.guard)
         self.usage: list[StageUsage] = []

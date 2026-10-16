@@ -250,7 +250,7 @@ class TestRunCycle:
         ]
         assert result.proposal == TradeProposal.model_validate(json.loads(_text("proposal_ok.json"))["proposal"])
 
-        assert _kinds(conn) == ["cycle_start", "market_snapshot", "proposal", "cycle_end"]
+        assert _kinds(conn) == ["cycle_start", "model_selection", "market_snapshot", "proposal", "cycle_end"]
         assert _event(conn, "cycle_start").payload == {"cycle_id": result.cycle_id, "symbols": ["SPY", "QQQ"]}
         assert _event(conn, "proposal").payload == {
             "cycle_id": result.cycle_id, "proposal_id": result.proposal_id, "symbol": "SPY",
@@ -259,7 +259,8 @@ class TestRunCycle:
             "cycle_id": result.cycle_id, "outcome": "proposal", "tokens_in": 300, "tokens_out": 150,
             "estimated_cost_usd": result.estimated_cost_usd, "proposal_id": result.proposal_id,
         }
-        assert all(event.level is EventLevel.INFO for event in _events(conn))
+        # FakeLLM cannot list models, so model_selection warns that the pins were used
+        assert all(event.level is EventLevel.INFO for event in _events(conn) if event.kind != "model_selection")
 
         trace = get_proposal_trace(conn, result.proposal_id)
         assert [r.stage for r in trace.reasoning] == STAGES
@@ -321,7 +322,7 @@ class TestRunCycle:
         assert [row.stage for row in rows] == STAGES[:2]
         assert {row.cycle_id for row in rows} == {result.cycle_id}
         assert {row.proposal_id for row in rows} == {None}
-        assert _kinds(conn) == ["cycle_start", "market_snapshot", "no_trade", "cycle_end"]
+        assert _kinds(conn) == ["cycle_start", "model_selection", "market_snapshot", "no_trade", "cycle_end"]
         no_trade = _event(conn, "no_trade")
         assert no_trade.payload == {"cycle_id": result.cycle_id, "reason": result.no_trade_reason}
         assert "thesis stage" in no_trade.message
@@ -337,7 +338,7 @@ class TestRunCycle:
         assert result.no_trade_reason is not None and "pricing does not justify it" in result.no_trade_reason
         assert [row.stage for row in get_cycle_reasoning(conn, result.cycle_id)] == STAGES
         assert get_recent_proposals(conn) == []
-        assert _kinds(conn) == ["cycle_start", "market_snapshot", "no_trade", "cycle_end"]
+        assert _kinds(conn) == ["cycle_start", "model_selection", "market_snapshot", "no_trade", "cycle_end"]
         no_trade = _event(conn, "no_trade")
         assert no_trade.payload == {"cycle_id": result.cycle_id, "reason": result.no_trade_reason}
         assert "proposal stage" in no_trade.message
@@ -355,7 +356,7 @@ class TestRunCycle:
         assert result.estimated_cost_usd == 0.0
         assert llm.calls == [] and llm.remaining("scan") == 1
         assert get_cycle_reasoning(conn, result.cycle_id) == []
-        assert _kinds(conn) == ["cycle_start", "market_snapshot", "budget_halt", "cycle_end"]
+        assert _kinds(conn) == ["cycle_start", "model_selection", "market_snapshot", "budget_halt", "cycle_end"]
         halt = _event(conn, "budget_halt")
         assert halt.level is EventLevel.WARNING
         assert halt.payload is not None
@@ -381,7 +382,7 @@ class TestRunCycle:
         assert result.brief is not None and result.candidates == ()
         assert [u.stage for u in result.usage] == [ReasoningStage.SCAN]
         assert [row.stage for row in get_cycle_reasoning(conn, result.cycle_id)] == [ReasoningStage.SCAN]
-        assert _kinds(conn) == ["cycle_start", "market_snapshot", "budget_halt", "cycle_end"]
+        assert _kinds(conn) == ["cycle_start", "model_selection", "market_snapshot", "budget_halt", "cycle_end"]
         assert _event(conn, "budget_halt").payload["stage"] == "thesis"
         end = _event(conn, "cycle_end").payload
         assert (end["outcome"], end["tokens_in"], end["tokens_out"]) == ("halted", config.brain.per_cycle_token_cap - 2000, 50)
@@ -396,7 +397,7 @@ class TestRunCycle:
         cycle_id = llm.calls[0].cycle_id
         assert info.value.key == cycle_id
 
-        assert _kinds(conn) == ["cycle_start", "market_snapshot", "brain_error", "cycle_end"]
+        assert _kinds(conn) == ["cycle_start", "model_selection", "market_snapshot", "brain_error", "cycle_end"]
         error = _event(conn, "brain_error")
         assert error.level is EventLevel.ERROR
         assert error.payload == {"cycle_id": cycle_id, "stage": "proposal", "error": str(info.value)}
@@ -460,7 +461,7 @@ class TestRunCycle:
         # the halt propagated unchanged, so no stage output is known: the row says so, never the prompt
         assert row.content == f"(no usable output: BudgetExceeded: {result.halt_reason})"
         assert get_cycle_token_usage(conn, result.cycle_id).total == cap - 2000 + 50
-        assert _kinds(conn) == ["cycle_start", "market_snapshot", "budget_halt", "cycle_end"]
+        assert _kinds(conn) == ["cycle_start", "model_selection", "market_snapshot", "budget_halt", "cycle_end"]
         halt = _event(conn, "budget_halt").payload
         assert (halt["stage"], halt["limit"], halt["cycle_tokens"]) == ("scan", "cycle", cap - 2000 + 50)
         end = _event(conn, "cycle_end").payload
@@ -470,7 +471,7 @@ class TestRunCycle:
         llm = FakeLLM({"scan": [RuntimeError("transport exploded")]})
         with pytest.raises(RuntimeError, match="transport exploded"):
             run_cycle(conn, llm, config=config, snapshot=snapshot)
-        assert _kinds(conn) == ["cycle_start", "market_snapshot", "brain_error", "cycle_end"]
+        assert _kinds(conn) == ["cycle_start", "model_selection", "market_snapshot", "brain_error", "cycle_end"]
         error = _event(conn, "brain_error")
         assert error.level is EventLevel.ERROR
         assert error.payload == {"cycle_id": llm.calls[0].cycle_id, "stage": "scan", "error": "RuntimeError: transport exploded"}
@@ -507,7 +508,7 @@ class TestRunCycle:
         assert thesis.content == f"(no usable output: {described})"
         # two responses were billed (the interrupted call returned none): all of it is journaled
         assert get_cycle_token_usage(conn, cycle_id) == TokenUsage(tokens_in=200, tokens_out=100, calls=2)
-        assert _kinds(conn) == ["cycle_start", "market_snapshot", "brain_error", "cycle_end"]
+        assert _kinds(conn) == ["cycle_start", "model_selection", "market_snapshot", "brain_error", "cycle_end"]
         assert _event(conn, "brain_error").payload == {"cycle_id": cycle_id, "stage": "thesis", "error": described}
         end = _event(conn, "cycle_end").payload
         assert (end["outcome"], end["tokens_in"], end["tokens_out"], end["proposal_id"]) == ("failed", 200, 100, None)
@@ -526,11 +527,11 @@ class TestRunCycle:
         assert row.model_name == "claude-haiku-answered"
         assert row.content == '{"symbols": ['  # the billed partial output, kept for the audit
         assert get_cycle_token_usage(conn, cycle_id) == TokenUsage(tokens_in=300, tokens_out=out, calls=1)
-        assert _kinds(conn) == ["cycle_start", "market_snapshot", "brain_error", "cycle_end"]
+        assert _kinds(conn) == ["cycle_start", "model_selection", "market_snapshot", "brain_error", "cycle_end"]
         assert _event(conn, "brain_error").payload["error"] == str(info.value)
         end = _event(conn, "cycle_end").payload
         assert (end["outcome"], end["tokens_in"], end["tokens_out"]) == ("failed", 300, out)
-        assert end["estimated_cost_usd"] == pytest.approx((300 * 1.0 + out * 5.0) / 1_000_000)  # haiku placeholders
+        assert end["estimated_cost_usd"] == pytest.approx((300 * 0.10 + out * 0.50) / 1_000_000)  # haiku 5.5 placeholders
 
     def test_blank_truncated_response_falls_back_to_the_note(self, conn, snapshot, config, monkeypatch):
         """A billed answer with no text (thinking alone hit max_tokens) still gets an accounting row."""
@@ -562,7 +563,7 @@ class TestRunCycle:
             run_cycle(conn, llm, config=config, snapshot=snapshot)
         # the thesis row, then its accounting row: that write fails too, and is swallowed
         assert written == [ReasoningStage.SCAN, ReasoningStage.THESIS, ReasoningStage.THESIS]
-        assert _kinds(conn) == ["cycle_start", "market_snapshot", "brain_error", "cycle_end"]
+        assert _kinds(conn) == ["cycle_start", "model_selection", "market_snapshot", "brain_error", "cycle_end"]
         error = _event(conn, "brain_error").payload
         assert error["stage"] == "thesis"
         assert error["error"].startswith("StoreError: store operation failed: add reasoning")
@@ -598,7 +599,7 @@ class TestRunCycle:
 
         def dying(conn_, event):
             kinds.append(event.kind)
-            if len(kinds) > 2:  # the store dies after cycle_start and market_snapshot
+            if len(kinds) > 3:  # the store dies after cycle_start, model_selection and market_snapshot
                 raise StoreError("log event", event.kind, Exception("disk full"))
             return log_event(conn_, event)
 
@@ -606,7 +607,7 @@ class TestRunCycle:
         with pytest.raises(type(error)) as info:
             run_cycle(conn, FakeLLM({"scan": [error]}), config=config, snapshot=snapshot)
         assert info.value is error
-        assert kinds == ["cycle_start", "market_snapshot", "brain_error", "cycle_end"]  # both were attempted
+        assert kinds == ["cycle_start", "model_selection", "market_snapshot", "brain_error", "cycle_end"]  # both were attempted
 
     def test_the_proposal_its_legs_and_the_link_land_together_or_not_at_all(self, conn, snapshot, config):
         """The link of the cycle's reasoning rows runs in the proposal's own transaction: when
@@ -624,7 +625,7 @@ class TestRunCycle:
         assert conn.execute("SELECT COUNT(*) FROM proposal_legs").fetchone()[0] == 0
         rows = get_cycle_reasoning(conn, cycle_id)
         assert [row.stage for row in rows] == STAGES and {row.proposal_id for row in rows} == {None}
-        assert _kinds(conn) == ["cycle_start", "market_snapshot", "brain_error", "cycle_end"]
+        assert _kinds(conn) == ["cycle_start", "model_selection", "market_snapshot", "brain_error", "cycle_end"]
         end = _event(conn, "cycle_end").payload
         assert (end["outcome"], end["proposal_id"]) == ("failed", None)
 
@@ -694,7 +695,7 @@ class TestRunCycle:
             run_cycle(conn, llm, config=config, snapshot=snapshot)
         assert get_recent_proposals(conn) == []
         assert all("invalidation must not be blank" in call.messages[-1].content for call in llm.calls[3:])
-        assert _kinds(conn) == ["cycle_start", "market_snapshot", "brain_error", "cycle_end"]
+        assert _kinds(conn) == ["cycle_start", "model_selection", "market_snapshot", "brain_error", "cycle_end"]
 
     def test_closed_market_brief_carries_the_staleness_warning(self, conn, closed_snapshot, config):
         llm = FakeLLM.from_fixtures({"scan": ["scan_no_warnings.json"], "thesis": ["thesis_empty.json"]})
@@ -807,7 +808,7 @@ class TestRunCycle:
         with pytest.raises(BrainError, match="build market snapshot"):
             run_cycle(conn, llm, config=config)
         assert llm.calls == []
-        assert _kinds(conn) == ["cycle_start", "brain_error", "cycle_end"]
+        assert _kinds(conn) == ["cycle_start", "model_selection", "brain_error", "cycle_end"]
         error = _event(conn, "brain_error").payload
         assert error is not None and error["stage"] is None and "no symbols to snapshot" in error["error"]
         assert _event(conn, "cycle_end").payload["outcome"] == "failed"
@@ -897,7 +898,7 @@ class TestCliOnce:
         assert "    [0] buy 2 call 640.0 exp 2026-08-21  SPY260821C00640000" in lines
         assert "    [1] sell 2 call 650.0 exp 2026-08-21  SPY260821C00650000" in lines
         assert "tokens" in lines
-        assert "  scan      in 100 / out 50   attempts 1   latency 1 ms   claude-haiku-4-5-20251001" in lines
+        assert "  scan      in 100 / out 50   attempts 1   latency 1 ms   claude-haiku-5-5" in lines
         assert "  total     in 300 / out 150 = 450" in lines
         assert "ESTIMATE from config brain.prices_per_mtok placeholders — not a bill" in out
         (proposal_line,) = [line for line in lines if line.startswith("proposal ")]
@@ -1029,7 +1030,7 @@ class TestCliOnce:
         try:
             cycle_id = llm.calls[0].cycle_id
             assert get_cycle_token_usage(conn, cycle_id) == TokenUsage(tokens_in=200, tokens_out=100, calls=2)
-            assert _kinds(conn) == ["cycle_start", "market_snapshot", "brain_error", "cycle_end"]
+            assert _kinds(conn) == ["cycle_start", "model_selection", "market_snapshot", "brain_error", "cycle_end"]
             assert _event(conn, "cycle_end").payload["outcome"] == "failed"
         finally:
             conn.close()
@@ -1053,7 +1054,7 @@ class TestCliStage:
             assert [row.stage for row in rows] == [ReasoningStage.SCAN]
             assert rows[0].content == _text("scan_ok.json")
             assert rows[0].model_name == "fake-model"  # the model that ANSWERED, not the configured one
-            assert _kinds(conn) == [MARKET_SNAPSHOT_EVENT]
+            assert _kinds(conn) == ["model_selection", MARKET_SNAPSHOT_EVENT]
             assert _event(conn, MARKET_SNAPSHOT_EVENT).payload["cycle_id"] == cycle_id
         finally:
             conn.close()
@@ -1253,7 +1254,7 @@ class TestCliStage:
             (row,) = get_cycle_reasoning(conn, cycle_id)
             assert (row.stage, row.tokens_in, row.tokens_out, row.content) == (ReasoningStage.SCAN, 400, 200, _text("malformed.json"))
             # after the final failure: BrainError AND an event, as the cycle logs it
-            assert _kinds(conn) == [MARKET_SNAPSHOT_EVENT, "brain_error"]
+            assert _kinds(conn) == ["model_selection", MARKET_SNAPSHOT_EVENT, "brain_error"]
             error = _event(conn, "brain_error")
             assert error.level is EventLevel.ERROR
             assert error.payload["cycle_id"] == cycle_id and error.payload["stage"] == "scan"
@@ -1264,7 +1265,7 @@ class TestCliStage:
     def test_a_halted_stage_logs_budget_halt_not_brain_error(self, db_path, conn, snapshot, config, capsys):
         _seed(conn, "cycle-earlier", config.brain.daily_token_budget)
         assert cli_brain.main(["stage", "scan", "--db", str(db_path)], llm=_fake(), snapshot_builder=_builder(snapshot)) == 2
-        assert _kinds(conn) == [MARKET_SNAPSHOT_EVENT, "budget_halt"]
+        assert _kinds(conn) == ["model_selection", MARKET_SNAPSHOT_EVENT, "budget_halt"]
 
     def test_interrupted_stage_journals_the_attempt_it_received(self, db_path, snapshot):
         llm = FakeLLM({"scan": [_text("malformed.json"), KeyboardInterrupt()]})
@@ -1328,7 +1329,9 @@ class TestCliUsage:
             cost = _event(conn, "cycle_end").payload["estimated_cost_usd"]
         finally:
             conn.close()
-        assert len(models) == 3 and any(model not in config.brain.prices_per_mtok for model in models)
+        configured = {config.brain.stage(stage.value).model for stage in STAGES}
+        assert models == {f"{model}-20260301" for model in configured}
+        assert any(model not in config.brain.prices_per_mtok for model in models)
         assert cost is not None and cost > 0  # once priced the requested (configured) models
         assert cli_brain.main(["usage", "--db", str(db_path)]) == 0
         lines = capsys.readouterr().out.splitlines()
