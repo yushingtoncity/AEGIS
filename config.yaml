@@ -175,3 +175,24 @@ broker:
   max_decision_age_seconds: 300  # an AUTO_EXECUTE verdict older than 5 minutes is not acted on; the next brain cycle proposes again
   approval_ttl_seconds: 900      # a human "yes" is good for 15 minutes; the order is re-checked against fresh data either way
   not_found_grace_seconds: 120   # an order whose send ended unclear and that the broker still does not know after 2 minutes is marked cancelled (it still counts toward max_daily_trades)
+
+# Phase 7 notifications (aegis/notify): tell the operator what happened,
+# read from the store's events table. The notifier never touches an order or
+# a control: it reads events and writes only its own notify_* ones. Where a
+# notice goes lives in .env, never here: IMESSAGE_TO for imessage,
+# SLACK_WEBHOOK_URL for slack, NTFY_TOPIC_URL (and optional NTFY_TOKEN) for ntfy.
+notify:
+  enabled: false                 # off until the channel's address is in .env on the mini and `notify test` reached you; `notify send` refuses while false
+  channel: imessage              # imessage (a text from Messages on the mini; macOS only), slack (an incoming webhook) or ntfy (a push app)
+  timeout_seconds: 10            # per notice: one text or one small POST; a stuck send must not hang a tick
+  min_level: warning             # every warning, error and critical event goes out (rejects, refusals, orphans, halts, the kill switch)
+  kinds:                         # ...and these too, whatever their level
+    - policy_needs_approval      # a verdict is waiting on your yes; an approval is good for broker.approval_ttl_seconds (15 min)
+    - approval_answered          # the record of your yes or no
+    - order_submitted            # an order reached the broker
+    - order_updated              # the broker moved an order on: fills, cancels
+  ignore_kinds:                  # never these, whatever their level
+    - policy_reject              # the gate turning a proposal down is the system working; a push every brain cycle would bury the ones that matter (`python -m aegis.cli.trace` shows them)
+  lookback_minutes: 60           # events older than this are never sent: a first run (or one after a long outage) does not replay history
+  max_attempts: 3                # a notice that failed this many times is given up on (each failure is a notify_failed event)
+  max_per_run: 20                # at most this many pushes per run, oldest first; the rest wait for the next run (a run can take max_per_run x timeout_seconds = 200 s at worst, so from cron run it every 5 minutes or slower: two runs at once can push the same notice twice)
