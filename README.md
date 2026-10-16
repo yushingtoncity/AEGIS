@@ -476,10 +476,15 @@ Definitions the rules share (`aegis/policy/measures.py`):
   on the ticker (shares and contracts) plus the notional of open orders on it.
 - **A position** is a distinct underlying held or pending, so a four-leg
   condor is one position, not four.
-- **A closing sale** is an equity sell of no more than the long quantity
-  held — and there must be one. It consumes no buying power, adds no exposure
-  and no position, and can qualify for the auto tier. Every other rule still
-  applies to it: the kill switch, a halt, a closed market, the loss limit and
+- **A closing sale** is a sell of no more than the long quantity held — and
+  there must be one: an equity sell against the shares held, or a sound
+  single-leg option sell against the contracts held in that same contract.
+  It consumes no buying power, adds no exposure and no position. An equity
+  closing sale can qualify for the auto tier; an option one adds no risk
+  (`options_max_loss` passes it, and `options_min_dte` lets it close inside
+  the floor) but still always needs a person's approval. A spread, a call
+  against shares, or a contract not held is never a close. Every other rule
+  still applies: the kill switch, a halt, a closed market, the loss limit and
   the trade cap stop a closing sale like anything else.
 - **DTE** counts calendar days from the trading date (the date in the
   exchange's timezone) to expiration: 0 expires today.

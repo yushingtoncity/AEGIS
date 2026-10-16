@@ -185,6 +185,28 @@ def holding(qty=10.0, **overrides) -> PolicyContext:
     return make_context(positions=(make_position(qty=qty),), **overrides)
 
 
+def sell_call(contracts=1.0, **overrides) -> ProposalUnderReview:
+    """Sell ``contracts`` SPY 640 calls (``long_call``'s contract) for 8.00."""
+    return make_option(
+        [("sell", "call", 640.0)],
+        **{"side": "sell", "limit_price": 8.00, "quantity": contracts, **overrides},
+    )
+
+
+def call_row(contracts=1.0, side="long", **overrides):
+    """A position of ``contracts`` SPY 640 calls marked at 8.00 (800.00 each)."""
+    return make_position(
+        occ(OptionType.CALL, 640.0), contracts, side, current_price=8.00,
+        market_value=abs(contracts) * 800.0, **overrides,
+    )
+
+
+def holding_calls(contracts=1.0, proposal=None, **overrides) -> PolicyContext:
+    """``context_for`` the sale, holding ``contracts`` SPY 640 calls long."""
+    proposal = sell_call() if proposal is None else proposal
+    return context_for(proposal, positions=(call_row(contracts),), **overrides)
+
+
 def option_proposal(legs, **overrides) -> ProposalUnderReview:
     """An option proposal with exactly these ``ProposalLeg``s (possibly none, or broken)."""
     fields = {"symbol": UNDERLYING, "instrument": Instrument.OPTION, "limit_price": 4.40}
@@ -1072,11 +1094,36 @@ class TestIsClosingSale:
         unknown = make_context(positions=(make_position(qty=NAN, market_value=1.0),))
         assert not is_closing_sale(sell(1), unknown)
 
-    def test_only_an_equity_sell_can_close(self):
-        assert not is_closing_sale(make_proposal(), holding(10))  # a buy
-        option_sell = naked_short_call()
-        held = make_context(positions=(make_position(option_sell.proposal.symbol, 5),))
-        assert not is_closing_sale(option_sell, held)
+    def test_a_buy_never_closes(self):
+        assert not is_closing_sale(make_proposal(), holding(10))
+        assert not is_closing_sale(long_call(), holding_calls(5))
+
+    def test_selling_an_option_held_long_closes_it(self):
+        assert is_closing_sale(sell_call(1), holding_calls(5))
+        assert is_closing_sale(sell_call(5), holding_calls(5))
+        assert not is_closing_sale(sell_call(6), holding_calls(5))
+
+    def test_an_option_sale_with_no_long_contract_behind_it_writes_one(self):
+        assert not is_closing_sale(sell_call(), make_context())
+        assert not is_closing_sale(sell_call(), make_context(positions=None))
+        short = make_context(positions=(call_row(-1, "short"),))
+        assert not is_closing_sale(sell_call(), short)
+        # Another contract, or the underlying's shares (a covered call), is not it.
+        assert not is_closing_sale(naked_short_call(), holding_calls(5))
+        shares = make_context(positions=(make_position(UNDERLYING, 100),))
+        assert not is_closing_sale(sell_call(), shares)
+
+    def test_only_one_sound_leg_that_sells_can_close_an_option(self):
+        held = holding_calls(5)
+        spread = make_option(
+            [("sell", "call", 640.0), ("buy", "call", 650.0)], side="sell", limit_price=4.0
+        )
+        assert not is_closing_sale(spread, held)
+        buying_leg = make_option([("buy", "call", 640.0)], side="sell", limit_price=8.0)
+        assert not is_closing_sale(buying_leg, held)
+        misnamed = sell_call(symbol=occ(OptionType.CALL, 650.0))
+        assert measures.structure_problems(misnamed)
+        assert not is_closing_sale(misnamed, held)
 
     def test_a_position_in_another_symbol_does_not_count(self):
         assert not is_closing_sale(sell(1), make_context(positions=(make_position("MSFT", 10),)))
@@ -3924,6 +3971,16 @@ class TestOptionsMinDte:
         result = run(rules.options_min_dte)
         assert result.outcome is PASS and result.detail == "not an option"
 
+    def test_a_held_option_can_be_sold_inside_the_floor(self):
+        expiry = MARKET_DATE + timedelta(days=2)
+        sale = sell_call(expiration=expiry)
+        row = make_position(sale.legs[0].symbol, 1, current_price=8.00, market_value=800.0)
+        result = run(rules.options_min_dte, sale, make_context(positions=(row,)))
+        assert result.outcome is PASS and "closing sale at 2 DTE" in result.detail
+        # Writing the same contract that close to expiry is still refused.
+        assert run(rules.options_min_dte, sale).outcome is REJECT
+        assert self.expiring(2).outcome is REJECT
+
     def test_three_weeks_out_passes(self):
         result = run(rules.options_min_dte, long_call())
         assert result.outcome is PASS and "22 DTE" in result.detail
@@ -4017,6 +4074,18 @@ class TestOptionsMaxLoss:
         for plain in (sell(), make_proposal(symbol="TSLA", quantity=5000)):
             result = run(rules.options_max_loss, plain)
             assert result.outcome is PASS and result.detail == "not an option"
+
+    def test_selling_back_a_held_option_adds_no_risk(self):
+        sale = sell_call()
+        assert context_for(sale).analysis.unlimited_risk  # priced as if written
+        result = run(rules.options_max_loss, sale, holding_calls(1))
+        assert result.outcome is PASS
+        assert result.detail == "sell 1 SPY260821C00640000 closes a long option position: no new risk"
+        # Without the contract held, the same sale writes a naked call.
+        result = run(rules.options_max_loss, sale, context_for(sale))
+        assert result.outcome is REJECT and "unlimited risk" in result.detail
+        result = run(rules.options_max_loss, sell_call(2), holding_calls(1, sell_call(2)))
+        assert result.outcome is REJECT and "unlimited risk" in result.detail
 
     @BROKEN
     def test_a_shape_that_contradicts_itself_rejects_with_the_finding(self, proposal, finding):

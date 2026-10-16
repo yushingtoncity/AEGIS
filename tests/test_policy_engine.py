@@ -1332,6 +1332,19 @@ class TestClosingSales:
         assert evaluation.verdict is Verdict.AUTO_EXECUTE
         assert found(evaluation) == {}
 
+    def test_selling_back_a_held_option_needs_approval_and_nothing_else(self):
+        sale = make_option([("sell", "call", 640.0)], side="sell", limit_price=8.00)
+        (leg,) = sale.legs
+        held = (make_position(leg.symbol, 1, current_price=8.00, market_value=800.0),)
+        evaluation = judge(sale, context_for(sale, positions=held))
+        assert evaluation.verdict is Verdict.NEEDS_APPROVAL
+        assert found(evaluation) == {"options_escalate": ESCALATE, "auto_tier": ESCALATE}
+        # The same sale with no call held writes one: unlimited risk, rejected.
+        written = judge(sale, context_for(sale))
+        assert written.verdict is Verdict.REJECT
+        for rule in ("buying_power", "max_position_pct", "options_max_loss"):
+            assert result_of(written, rule).outcome is REJECT
+
     @pytest.mark.parametrize(("stop", "rule"), ACCOUNT_STOPS)
     def test_every_account_level_stop_rejects_a_closing_sale(self, stop, rule):
         evaluation = judge(closing_sale(), make_context(positions=HELD, **stop))
