@@ -319,12 +319,20 @@ def test_shipped_broker_block_matches_the_code_defaults():
         "  kind: live\n",
         "  http_timeout_seconds: 0\n",
         "  max_decision_age_seconds: -1\n",
+        "  max_decision_age_seconds: 0\n",  # no verdict could ever be young enough
         "  approval_ttl_seconds: .inf\n",
         "  not_found_grace_seconds: -5\n",
         "  enabled: maybe\n",
+        "  enabled: 'true'\n",  # a quoted string never turns placing on
+        "  enabled: 1\n",
         "  base_url: https://api.alpaca.markets\n",
     ],
 )
 def test_broker_block_refuses_what_it_cannot_honour(tmp_path, broker):
     with pytest.raises(ConfigError, match="broker"):
         load_config(write(tmp_path, MINIMAL + "broker:\n" + broker))
+
+
+def test_broker_enabled_takes_a_real_boolean(tmp_path):
+    assert load_config(write(tmp_path, MINIMAL + "broker:\n  enabled: true\n")).broker.enabled is True
+    assert load_config(write(tmp_path, MINIMAL + "broker:\n  enabled: false\n")).broker.enabled is False

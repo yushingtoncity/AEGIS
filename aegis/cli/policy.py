@@ -102,7 +102,7 @@ from aegis.policy.models import (
 from aegis.store.db import MEMORY_DB, connect, open_store, resolve_db_path, status
 from aegis.store.errors import StoreError
 from aegis.store.models import Controls, Event, EventLevel, PolicyDecision
-from aegis.store.repo import get_controls, set_kill_switch
+from aegis.store.repo import get_controls, get_execution_orders, set_kill_switch
 
 ContextBuilder = Callable[..., PolicyContext]
 """``build_context``'s shape: ``(conn, proposal=None, *, config=...) -> PolicyContext``."""
@@ -120,6 +120,10 @@ STALE_CONTEXT_NOTE = (
     " the rule lines are what was judged; the context block is this command's earlier reading"
 )
 INIT_HINT = "python -m aegis.cli.db init"
+KILL_HINT = (
+    "note: the switch stops new orders; it does not cancel working ones ({working} in the"
+    " store): run `python -m aegis.cli.orders stand-down`"
+)
 
 _USD = "USD"  # the unit of a ``LimitLine`` that holds dollars; the others hold counts
 MARKET_HOURS_RULE = "market_hours"  # as ``LimitsReport.blocked_by`` names it
@@ -598,6 +602,7 @@ def _kill_set(db_path: Path, on: bool) -> int:
             payload={"state": state, "previous": was, "source": "cli"},
         )
         controls = set_kill_switch(conn, on, now=now, event=event)
+        working = len(get_execution_orders(conn))
     finally:
         conn.close()
     # the state printed is the one read back from the store, not the one asked for
@@ -607,6 +612,8 @@ def _kill_set(db_path: Path, on: bool) -> int:
             f"the kill switch was set {state} but reads {_switch(controls.kill_switch).upper()}:"
             f" {'; '.join(controls.problems) or 'the controls table is not as migrated'}"
         )
+    if on:  # spec D4: the switch is a store write; working orders keep working until stood down
+        print(KILL_HINT.format(working=working))
     return 0
 
 

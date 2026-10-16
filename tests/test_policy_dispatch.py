@@ -36,16 +36,20 @@ from aegis.policy.errors import PlacementError
 from aegis.store import (
     Approval,
     ApprovalResponse,
+    Broker,
     Controls,
     DecisionPurpose,
     EventLevel,
     Instrument,
+    Order,
     OrderSide,
     OrderStatus,
     OrderType,
     PolicyDecision,
     PositionIntent,
+    StoreError,
     Verdict,
+    apply_broker_update,
     count_orders_submitted_between,
     get_controls,
     get_decision,
@@ -59,6 +63,7 @@ from aegis.store import (
     record_decision,
     set_halt_until,
     set_kill_switch,
+    upsert_order,
 )
 
 UTC = timezone.utc
@@ -213,6 +218,15 @@ def _approve(conn, decision, clock=lambda: LATER, **kwargs):
                            clock=clock, **kwargs)
 
 
+def _legacy(conn, proposal_id="prop-0001"):
+    """An order written before Phase 6 (no decision): never the dispatcher's."""
+    return upsert_order(conn, Order(
+        id="legacy-1", proposal_id=proposal_id, client_order_id="legacy-1", broker=Broker.PAPER,
+        status=OrderStatus.SUBMITTED, submitted_at=NOW - timedelta(hours=1), symbol="AAPL",
+        side=OrderSide.BUY, quantity=1.0,
+    ))
+
+
 # --- the happy paths -------------------------------------------------------------
 
 
@@ -346,12 +360,37 @@ class TestNothingIsSent:
                         clock=lambda: LATER)
         assert "the answer was rejected" in str(_refused(conn, verdict.id))
 
+    def test_a_request_nobody_answered_is_no_yes(self, conn):
+        # found by mutation: a request row with no response was never placed against
+        proposal, verdict = _judged(conn, long_call())
+        record_approval(conn, Approval(
+            proposal_id=proposal.id, requested_at=NOW, channel="notifier", decision_id=verdict.id,
+            expires_at=LATER + timedelta(minutes=5),
+        ))
+        assert "awaits a human answer" in str(_refused(conn, verdict.id))
+
+    def test_a_yes_with_no_expiry_is_refused_before_the_recheck(self, conn):
+        # `answer` never writes one; another writer of approvals might
+        proposal, verdict = _judged(conn, long_call())
+        record_approval(conn, Approval(
+            proposal_id=proposal.id, requested_at=NOW, responded_at=LATER,
+            response=ApprovalResponse.APPROVED, channel="notifier", responder="someone",
+            decision_id=verdict.id, expires_at=None,
+        ))
+        before = _snapshot(conn)
+        assert "the approval expired: never set" in str(_refused(conn, verdict.id))
+        assert _snapshot(conn) == before
+
     @pytest.mark.parametrize(
         ("proposal", "message"),
         [
             (make_proposal(order_type=OrderType.MARKET, limit_price=None), "only limit orders"),
+            (make_proposal(order_type=OrderType.MARKET, limit_price=200.0), "only limit orders"),
             (make_proposal(quantity=2.5), "is not a whole number of shares"),
             (call_debit_spread(), "a 2-leg option order: only single-leg options"),
+            (make_proposal(limit_price=200.005), "limit 200.005 is finer than a cent"),
+            (make_option([("buy", "call", 640.0)], side="buy", limit_price=8.0, quantity=1.5),
+             "quantity 1.5 is not a whole number of contracts"),
         ],
     )
     def test_shapes_out_of_phase_6_are_refused_before_the_recheck(self, conn, proposal, message):
@@ -426,11 +465,12 @@ class TestMint:
         approval = type("A", (), {"id": "appr-1"})()
         return verdict, regate, approval, context_for(proposal, **context)
 
-    def test_selling_a_held_option_closes_it(self):
+    @pytest.mark.parametrize("held", [3, 1])  # 1: exactly what is sold
+    def test_selling_a_held_option_closes_it(self, held):
         proposal = make_option([("sell", "call", 640.0)], side="sell", limit_price=8.0)
         symbol = proposal.legs[0].symbol
         verdict, regate, approval, context = self._pair(
-            proposal, positions=(make_position(symbol, qty=3, side="long"),)
+            proposal, positions=(make_position(symbol, qty=held, side="long"),)
         )
         order = dispatch.mint(proposal, verdict, regate, approval, context)
         assert order.position_intent is PositionIntent.SELL_TO_CLOSE and order.side is OrderSide.SELL
@@ -440,6 +480,7 @@ class TestMint:
         [
             ("sell", (), "would open a short"),
             ("sell", ((1, "long"),), "would open a short: the account holds 1"),
+            ("sell", ((2, "short"),), "would open a short: the account holds 0"),
             ("buy", ((1, "short"),), "buying to close is out of Phase 6"),
             ("buy", None, "positions are unknown"),
         ],
@@ -455,11 +496,47 @@ class TestMint:
         with pytest.raises(PlacementError, match=message):
             dispatch.mint(proposal, verdict, regate, approval, context)
 
-    def test_a_price_the_broker_cannot_take_is_refused(self):
-        proposal = make_proposal(limit_price=200.123456)
+    def test_only_the_contract_itself_counts_as_held(self):
+        proposal = make_option([("sell", "call", 640.0)], side="sell", limit_price=8.0)
+        other = make_option([("buy", "call", 650.0)], side="buy", limit_price=3.6).legs[0].symbol
+        held = (make_position(other, qty=5, side="long"), make_position("SPY", qty=100, side="long"))
+        verdict, regate, approval, context = self._pair(proposal, positions=held)
+        with pytest.raises(PlacementError, match="would open a short: the account holds 0"):
+            dispatch.mint(proposal, verdict, regate, approval, context)
+
+    def test_the_order_is_the_legs_contract_not_the_proposals_symbol(self):
+        # a hand-written single-leg proposal may name the underlying
+        proposal = make_option([("buy", "call", 640.0)], side="buy", limit_price=8.0, symbol="SPY")
+        verdict, regate, approval, context = self._pair(proposal)
+        order = dispatch.mint(proposal, verdict, regate, approval, context)
+        assert order.symbol == proposal.legs[0].symbol == "SPY260821C00640000"
+
+    @pytest.mark.parametrize(
+        ("price", "message"),
+        [
+            (200.123456, "limit 200.123456 is finer than a cent"),
+            (200.005, "limit 200.005 is finer than a cent"),  # the mid the brain is asked for
+            (0.12345, "cannot be built"),  # below $1: four places at most
+        ],
+    )
+    def test_a_price_the_broker_cannot_take_is_refused(self, price, message):
+        proposal = make_proposal(limit_price=price)
         verdict, regate, _, context = self._pair(proposal)
-        with pytest.raises(PlacementError, match="cannot be built"):
+        with pytest.raises(PlacementError, match=message):
             dispatch.mint(proposal, verdict, regate, None, context)
+
+    @pytest.mark.parametrize("price", [200.01, 200.1, 200.0, 0.1234, 0.5])
+    def test_whole_cents_and_sub_dollar_prices_are_built(self, price):
+        proposal = make_proposal(limit_price=price)
+        verdict, regate, _, context = self._pair(proposal)
+        assert dispatch.mint(proposal, verdict, regate, None, context).limit_price == Decimal(repr(price))
+
+    def test_the_operator_line_shows_the_exact_price(self):
+        # found in review: :g printed 12345.7 for a limit sent as 12345.67
+        proposal = make_proposal(limit_price=12345.67, quantity=1.0)
+        verdict, regate, _, context = self._pair(proposal)
+        order = dispatch.mint(proposal, verdict, regate, None, context)
+        assert dispatch.describe(order) == "buy 1 AAPL limit 12345.67 day"
 
 
 # --- what the send left behind ---------------------------------------------------
@@ -521,6 +598,25 @@ class TestOutcomes:
         assert stored.status is OrderStatus.APPROVED
         assert stored.status_reason == "unknown_outcome: the send was interrupted (KeyboardInterrupt)"
 
+    def test_a_refusal_after_the_recheck_is_on_record(self, conn, monkeypatch):
+        """The re-check is a recorded decision; when minting then refuses, an
+        event says why nothing followed it (found in review)."""
+        _, verdict = _judged(conn)
+
+        def refuse(*args):
+            raise PlacementError("place order (the account is short the contract)")
+
+        monkeypatch.setattr(dispatch, "mint", refuse)
+        broker = FakeBroker()
+        assert "short the contract" in str(_refused(conn, verdict.id, broker))
+        assert broker.calls == [] and _events(conn)[-1] == "order_refused"
+        message = conn.execute("SELECT message FROM events ORDER BY rowid DESC").fetchone()[0]
+        assert message == f"decision {verdict.id}: place order (the account is short the contract)"
+        assert get_proposal_order(conn, verdict.proposal_id) is None
+        before = _snapshot(conn)
+        _refused(conn, verdict.id, broker, dry_run=True)  # a dry run records nothing
+        assert _snapshot(conn) == before
+
     def test_the_claim_counts_the_daily_cap_on_the_store(self, conn):
         _, verdict = _judged(conn)
         capped = CONFIG.model_copy(update={"risk_limits": RiskLimits(max_daily_trades=0)})
@@ -528,6 +624,31 @@ class TestOutcomes:
         error = _refused(conn, verdict.id, broker, config=capped)
         assert "the claim was refused: 0 orders sent today: at or above the cap of 0" in str(error)
         assert broker.calls == [] and _events(conn)[-1] == "order_refused"
+
+    def test_the_cap_counts_new_yorks_day_not_the_last_24_hours(self, conn):
+        yesterday = NOW - timedelta(hours=20)  # 15:00 in New York on July 29
+        earlier = make_proposal(id="prop-0000", cycle_id="c0")
+        _, first = _judged(conn, earlier, context_for(earlier, now=yesterday))
+        sent = yesterday + timedelta(seconds=10)
+        assert _place(conn, first.id, builder=_builder(now=sent), clock=lambda: sent).order
+        _, verdict = _judged(conn)
+        capped = CONFIG.model_copy(update={"risk_limits": RiskLimits(max_daily_trades=1)})
+        assert _place(conn, verdict.id, config=capped).order is not None
+
+    def test_a_receipt_the_store_cannot_record_is_an_unknown_outcome(self, conn, monkeypatch):
+        """The broker took the order; the store failed to write its answer.
+        The row keeps the attempt (never sent again) and sync settles it."""
+        _, verdict = _judged(conn)
+
+        def full(*args):
+            raise StoreError("apply broker update", "aegis-prop-0001", OSError("disk full"))
+
+        monkeypatch.setattr(dispatch, "_record_receipt", full)
+        error = _refused(conn, verdict.id, FakeBroker())
+        assert error.outcome == "unknown" and "the store could not record its answer" in str(error)
+        stored = get_order(conn, "aegis-prop-0001")
+        assert stored.status is OrderStatus.APPROVED
+        assert stored.status_reason == "unknown_outcome: the send was interrupted (StoreError)"
 
 
 # --- approve / reject ---------------------------------------------------------------
@@ -637,6 +758,35 @@ class TestSync:
         _placed(conn, broker)
         assert _sync(conn, broker).lines == ("aegis-prop-0001: submitted, unchanged",)
 
+    def test_a_fill_that_leaves_the_status_as_it_was_is_still_recorded(self, conn):
+        broker = FakeBroker()
+        order = _placed(conn, broker, make_proposal(quantity=3.0))
+        broker.fill(order.client_order_id, "1", "199.5")
+        _sync(conn, broker)
+        broker.fill(order.client_order_id, "2", "199.6")
+        report = _sync(conn, broker)
+        assert report.lines == ("aegis-prop-0001: partially_filled -> partially_filled (2 of 3 filled)",)
+        assert get_order(conn, order.client_order_id).filled_quantity == 2
+
+    def test_a_new_broker_word_is_recorded_when_the_status_holds(self, conn):
+        broker = FakeBroker()
+        order = _placed(conn, broker)
+        held = broker.book[order.client_order_id]
+        broker.book[order.client_order_id] = held.model_copy(update={"broker_status": "new"})
+        assert _sync(conn, broker).lines == ("aegis-prop-0001: submitted -> submitted (0 of 2 filled)",)
+        assert get_order(conn, order.client_order_id).broker_status == "new"
+
+    def test_an_order_whose_send_ended_unclear_is_adopted_when_it_turns_up(self, conn):
+        broker = FakeBroker()
+        _, verdict = _judged(conn)
+        broker.send = [("land", _failure(ExecutionOutcome.UNKNOWN, "read timed out"))]
+        broker.lookups = [None]  # not visible yet when place looked
+        _refused(conn, verdict.id, broker)
+        report = _sync(conn, broker)
+        assert report.lines == ("aegis-prop-0001: approved -> submitted (0 of 2 filled)",)
+        last = conn.execute("SELECT kind, level FROM events ORDER BY rowid DESC").fetchone()
+        assert tuple(last) == ("order_adopted", EventLevel.WARNING.value)
+
     def test_an_unacknowledged_order_the_broker_never_got_is_cancelled_after_the_grace(self, conn):
         broker = FakeBroker()
         _, verdict = _judged(conn)
@@ -675,6 +825,15 @@ class TestSync:
         assert _events(conn)[-2:] == ["orphan_broker_order", "kill_switch"]
         again = _sync(conn, broker)
         assert again.failures == 1 and _events(conn)[-1] == "orphan_broker_order"
+
+    def test_an_order_the_store_closed_but_the_broker_still_works_is_an_orphan(self, conn):
+        broker = FakeBroker()
+        order = _placed(conn, broker)
+        apply_broker_update(conn, order.client_order_id, status=OrderStatus.CANCELLED,
+                            synced_at=LATER, status_reason="closed by hand")
+        report = _sync(conn, broker)
+        assert report.failures == 1 and report.lines[0].startswith("ORPHAN aegis-prop-0001 ")
+        assert get_controls(conn).kill_switch
 
     def test_a_broker_that_cannot_be_read_is_a_failure(self, conn):
         broker = FakeBroker()
@@ -722,6 +881,34 @@ class TestCancel:
             dispatch.cancel(conn, "aegis-nowhere", config=CONFIG,
                             broker_factory=_factory(FakeBroker()), clock=lambda: LATER)
 
+    def test_an_order_from_before_phase_6_is_not_the_dispatchers(self, conn):
+        insert_proposal(conn, make_proposal().proposal)
+        _legacy(conn)
+        broker = FakeBroker()
+        with pytest.raises(PlacementError, match="no order placed under this name"):
+            dispatch.cancel(conn, "legacy-1", config=CONFIG, broker_factory=_factory(broker),
+                            clock=lambda: LATER)
+        assert broker.calls == []
+
+    @pytest.mark.parametrize("landed", [True, False])
+    def test_an_unacknowledged_order_is_looked_up_before_any_cancel(self, conn, landed):
+        broker = FakeBroker()
+        _, verdict = _judged(conn)
+        lost = _failure(ExecutionOutcome.UNKNOWN, "read timed out")
+        broker.send = [("land", lost) if landed else lost]
+        broker.lookups = [None]  # place's one lookup sees nothing yet
+        _refused(conn, verdict.id, broker)
+        report = dispatch.cancel(conn, "aegis-prop-0001", config=CONFIG,
+                                 broker_factory=_factory(broker), clock=lambda: LATER)
+        cancels = [call for call in broker.calls if call[0] == "cancel"]
+        if landed:
+            assert cancels == [("cancel", broker.book["aegis-prop-0001"].broker_order_id)]
+            assert report.failures == 0
+            assert get_order(conn, "aegis-prop-0001").status is OrderStatus.CANCELLED
+        else:
+            assert cancels == [] and report.failures == 1
+            assert report.lines[-1] == "aegis-prop-0001: not cancelled, the broker does not show it yet"
+
 
 class TestStandDown:
     def test_with_the_controls_clear_nothing_happens(self, conn):
@@ -745,6 +932,15 @@ class TestStandDown:
         assert report.failures == 0 and report.lines[0].startswith("standing down: ")
         assert get_order(conn, order.client_order_id).status is OrderStatus.CANCELLED
         assert _events(conn)[-1] == "stand_down"
+
+    def test_a_halt_is_over_at_its_own_instant(self, conn):
+        broker = FakeBroker()
+        order = _placed(conn, broker)
+        set_halt_until(conn, LATER, now=LATER)
+        report = dispatch.stand_down(conn, config=CONFIG, broker_factory=_factory(broker),
+                                     clock=lambda: LATER)
+        assert report.lines == ("controls clear: nothing to stand down",)
+        assert get_order(conn, order.client_order_id).status is OrderStatus.SUBMITTED
 
     def test_a_cancel_that_fails_is_a_failure(self, conn):
         broker = FakeBroker()
@@ -784,13 +980,36 @@ class TestTick:
         assert report.lines[-1] == "placing nothing: broker.enabled is false"
         assert report.placed == ()
 
-    def test_under_the_kill_switch_it_places_nothing(self, conn):
+    def test_under_the_kill_switch_it_cancels_what_works_and_places_nothing(self, conn):
+        """Spec live check 9: the switch on with an order working; tick stands
+        it down and sends nothing new."""
         broker = FakeBroker()
-        _judged(conn)
+        working = _placed(conn, broker)
+        _judged(conn, make_proposal(id="prop-0002", cycle_id="c2"))
         set_kill_switch(conn, True, now=LATER)
         report = self._tick(conn, broker)
         assert report.lines[-1] == "placing nothing: the controls say stop"
-        assert [c for c in broker.calls if c[0] == "submit"] == []
+        assert get_order(conn, working.client_order_id).status is OrderStatus.CANCELLED
+        assert len([c for c in broker.calls if c[0] == "submit"]) == 1  # the first order only
+
+    @pytest.mark.parametrize("outcome", list(ExecutionOutcome))
+    def test_a_placement_the_broker_did_not_take_is_a_failure(self, conn, outcome):
+        # found in review: a connect failure (not_sent) exited 0 and spent the decision silently
+        broker = FakeBroker()
+        _judged(conn)
+        broker.send = [_failure(outcome, "ConnectTimeout")]
+        if outcome is ExecutionOutcome.UNKNOWN:
+            broker.lookups = [None]
+        report = self._tick(conn, broker)
+        assert report.failures == 1 and report.placed == ()
+
+    def test_with_the_broker_not_fully_read_it_places_nothing(self, conn):
+        broker = FakeBroker()
+        _judged(conn)
+        broker.listing_error = _failure(ExecutionOutcome.UNKNOWN, "503")
+        report = self._tick(conn, broker)
+        assert report.lines[-1] == "placing nothing: the broker could not be fully read"
+        assert report.failures == 1 and [c for c in broker.calls if c[0] == "submit"] == []
 
     def test_a_refused_placement_is_a_line_not_a_failure(self, conn):
         broker = FakeBroker()
@@ -798,6 +1017,38 @@ class TestTick:
         builder = _builder(limits=RiskLimits(auto_execute={"enabled": True, "max_notional": 1}))
         report = self._tick(conn, broker, builder=builder)
         assert report.failures == 0 and "the re-check is NEEDS_APPROVAL" in report.lines[-1]
+
+
+class TestWhatIsReady:
+    """``pending`` and ``tick`` read these lists; each one is a read."""
+
+    @staticmethod
+    def _ids(decisions):
+        return [decision.id for decision in decisions]
+
+    def test_an_auto_execute_verdict_is_ready_until_it_ages_out(self, conn):
+        _, verdict = _judged(conn)
+        assert self._ids(dispatch.ready_decisions(conn, CONFIG, NOW + timedelta(seconds=299))) == [verdict.id]
+        assert dispatch.ready_decisions(conn, CONFIG, NOW + timedelta(seconds=301)) == []
+
+    def test_a_proposal_with_an_order_is_not_ready_again(self, conn):
+        _, verdict = _judged(conn)
+        _place(conn, verdict.id)
+        assert dispatch.ready_decisions(conn, CONFIG, LATER) == []
+
+    def test_an_answered_verdict_no_longer_awaits_approval(self, conn):
+        _, verdict = _judged(conn, long_call())
+        assert self._ids(dispatch.awaiting_approval(conn, CONFIG, LATER)) == [verdict.id]
+        assert dispatch.ready_decisions(conn, CONFIG, LATER) == []
+        _approve(conn, verdict)
+        assert dispatch.awaiting_approval(conn, CONFIG, LATER) == []
+        assert self._ids(dispatch.ready_decisions(conn, CONFIG, LATER)) == [verdict.id]
+
+    def test_the_oldest_goes_first(self, conn):
+        second = make_proposal(id="prop-0002", cycle_id="c2")
+        _, newer = _judged(conn, second, context_for(second, now=NOW + timedelta(seconds=5)))
+        _, older = _judged(conn)  # stored second, decided first
+        assert self._ids(dispatch.ready_decisions(conn, CONFIG, LATER)) == [older.id, newer.id]
 
 
 # --- the engine and context pieces this phase added -----------------------------------

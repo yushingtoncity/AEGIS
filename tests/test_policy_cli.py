@@ -1673,6 +1673,8 @@ class TestKill:
             captured = capsys.readouterr()
             assert captured.err == ""
             shown = "ON — every proposal is rejected" if state else "off"
+            # spec D4: kill on says the switch does not cancel working orders
+            hint = [cli_policy.KILL_HINT.format(working=0)] if state else []
             assert captured.out.splitlines() == [
                 f"kill switch: {shown} (was {previous})",
                 "  last set 2026-07-30 15:00:00 UTC",
@@ -1680,6 +1682,7 @@ class TestKill:
                 f"  last set {cli_policy._ts(controls_of(store).halt_until_updated_at)}",
                 "problems (0)",
                 "  (none)",
+                *hint,
             ]
             controls = controls_of(store)
             assert controls.kill_switch is state and controls.kill_switch_updated_at == NOW

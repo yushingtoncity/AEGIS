@@ -6,13 +6,13 @@ import sqlite3
 from datetime import timedelta
 
 import pytest
-from policy_factories import WATCHLIST, long_call, make_proposal
-from test_policy_dispatch import LATER, FakeBroker, _builder, _judged
+from policy_factories import NOW, WATCHLIST, long_call, make_proposal
+from test_policy_dispatch import LATER, FakeBroker, _builder, _judged, _legacy
 
 from aegis.cli import orders as cli
 from aegis.config import AegisConfig, BrokerConfig, ConfigError
 from aegis.policy import dispatch
-from aegis.store import get_order, open_store, set_kill_switch
+from aegis.store import Fill, get_order, insert_proposal, open_store, record_fill, set_kill_switch
 
 ON = AegisConfig(watchlist=list(WATCHLIST), broker=BrokerConfig(enabled=True))
 OFF = AegisConfig(watchlist=list(WATCHLIST))
@@ -106,6 +106,31 @@ class TestReading:
             "orders status failed: no order placed under the name aegis-nowhere\n"
         )
 
+    def test_status_of_an_order_from_before_phase_6(self, db, config, capsys):
+        _with(db, lambda c: (insert_proposal(c, make_proposal().proposal), _legacy(c)))
+        assert _run(db, "status", "legacy-1") == 1
+        assert capsys.readouterr().err == (
+            "orders status failed: no order placed under the name legacy-1\n"
+        )
+
+    def test_one_orders_fills_are_its_own(self, db, config, capsys):
+        def judged_beside_a_filled_legacy_order(conn):
+            _, verdict = _judged(conn)
+            legacy = _legacy(conn)
+            record_fill(conn, Fill(order_id=legacy.id, filled_at=NOW, fill_price=150.0,
+                                   fill_quantity=1.0))
+            return verdict
+
+        verdict = _with(db, judged_beside_a_filled_legacy_order)
+        broker = FakeBroker()
+        _run(db, "place", verdict.id, broker=broker)
+        broker.fill("aegis-prop-0001", "2", "199.9", "filled")
+        _run(db, "sync", broker=broker)
+        capsys.readouterr()
+        assert _run(db, "status", "aegis-prop-0001") == 0
+        out = capsys.readouterr().out
+        assert "fills (1)\n" in out and "150.00" not in out
+
 
 class TestPlacing:
     def test_approve_then_place_then_once_only(self, db, config, capsys):
@@ -144,6 +169,16 @@ class TestPlacing:
             cli.DRY_RUN_NOTE,
         ]
         assert broker.calls == [] and _rows(db) == before
+
+    def test_a_dry_run_never_migrates_the_store(self, db, config, capsys):
+        from test_policy_cli import drop_migration_0003, versions_of
+
+        verdict = _with(db, lambda c: _judged(c)[1])
+        drop_migration_0003(db)
+        before = versions_of(db)
+        assert _run(db, "place", verdict.id, "--dry-run") == 1
+        assert "has pending migrations (0003_controls)" in capsys.readouterr().err
+        assert versions_of(db) == before
 
     def test_a_refused_send_is_one_line_and_exit_1(self, db, config, capsys):
         from test_policy_dispatch import _failure
@@ -263,14 +298,22 @@ class TestFailing:
     def test_the_default_clock_is_the_wall_clock(self, db, config, capsys):
         assert cli.main(["pending", "--db", str(db)]) == 0  # reads utcnow, writes nothing
 
-    def test_a_proposal_named_with_control_characters_prints_on_one_line(self, db, config, capsys):
-        proposal = make_proposal(thesis="SYNTHETIC TEST DATA.")
-        _with(db, lambda c: _judged(c, proposal))
+    def test_stored_text_is_cleaned_before_it_reaches_the_terminal(self, db, config, capsys):
+        # found by mutation: the earlier version of this test stored nothing to clean
+        from test_policy_dispatch import _failure
+
+        from aegis.execution.models import ExecutionOutcome
+
+        verdict = _with(db, lambda c: _judged(c)[1])
         broker = FakeBroker()
-        _run(db, "tick", broker=broker)
+        broker.send = [_failure(ExecutionOutcome.REJECTED, "bad \x1b[31mred\x1b[0m price")]
+        _run(db, "place", verdict.id, broker=broker)
+        reason = _with(db, lambda c: get_order(c, "aegis-prop-0001")).status_reason
+        assert "\x1b[31m" in reason  # the store keeps what the broker said
         capsys.readouterr()
         assert _run(db, "status", "--all") == 0
-        assert all("\x1b" not in line for line in capsys.readouterr().out.splitlines())
+        out = capsys.readouterr().out
+        assert "\x1b" not in out and "red" in out and out.count("\n") == 2
 
 
 def test_the_approval_window_is_the_configs(db, config, capsys):
@@ -294,3 +337,24 @@ def test_the_trace_shows_the_recheck_the_approval_and_the_order(db, config, caps
     assert f"answers decision {verdict.id}, good until " in out
     assert f"decision {verdict.id}   re-check " in out
     assert "filled 0 of 1   broker status accepted   synced 2026-07-30 15:00:10 UTC" in out
+
+
+def test_kill_on_says_working_orders_keep_working(db, config, capsys):
+    """Spec D4: `policy kill on` is a store write and prints the hint, with
+    the number of orders still working."""
+    from aegis.cli import policy as policy_cli
+
+    broker = FakeBroker()
+    _with(db, lambda c: _judged(c))
+    _with(db, lambda c: _judged(c, make_proposal(id="prop-0002", cycle_id="c2")))
+    _run(db, "tick", broker=broker)
+    broker.fill("aegis-prop-0002", "2", "200", "filled")  # done: no longer working
+    _run(db, "sync", broker=broker)
+    capsys.readouterr()
+    assert policy_cli.main(["kill", "on", "--db", str(db)]) == 0
+    assert capsys.readouterr().out.splitlines()[-1] == (
+        "note: the switch stops new orders; it does not cancel working ones (1 in the store):"
+        " run `python -m aegis.cli.orders stand-down`"
+    )
+    assert policy_cli.main(["kill", "off", "--db", str(db)]) == 0
+    assert "note:" not in capsys.readouterr().out

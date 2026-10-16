@@ -186,6 +186,13 @@ def _one_line(text: object) -> str:
     return " ".join(str(text).split())
 
 
+def _exact(value: float | int | Decimal) -> str:
+    """A number as it is, every digit and no exponent: ``200``, ``1234.5678``."""
+    number = value if isinstance(value, Decimal) else Decimal(repr(value))
+    text = format(number, "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
 def _now(clock: Clock) -> datetime:
     now = clock()
     if not isinstance(now, datetime) or now.utcoffset() is None:
@@ -316,7 +323,7 @@ def regate_refusal(verdict: PolicyDecision, regate: PolicyDecision) -> str | Non
 
 def _whole(quantity: float, what: str, key: str) -> int:
     if quantity != int(quantity):
-        raise PlacementError(f"place order ({what} {quantity:g} is not a whole number)", key)
+        raise PlacementError(f"place order ({what} {_exact(quantity)} is not a whole number)", key)
     return int(quantity)
 
 
@@ -354,7 +361,14 @@ def shape_problem(proposal: ProposalUnderReview) -> str | None:
         return "only limit orders are placed in Phase 6"
     if proposal.is_equity:
         if order.quantity != int(order.quantity):
-            return f"quantity {order.quantity:g} is not a whole number of shares"
+            return f"quantity {_exact(order.quantity)} is not a whole number of shares"
+        price = Decimal(repr(order.limit_price))
+        places = -price.as_tuple().exponent if price.as_tuple().exponent < 0 else 0
+        if price >= 1 and places > 2:
+            return (
+                f"limit {_exact(price)} is finer than a cent: a stock at $1 or more trades in"
+                " whole cents, and the broker would refuse it"
+            )
         return None
     if len(proposal.legs) != 1:
         return (
@@ -362,7 +376,7 @@ def shape_problem(proposal: ProposalUnderReview) -> str | None:
             " the multi-leg debit/credit sign is checked live (D6)"
         )
     if proposal.legs[0].quantity != int(proposal.legs[0].quantity):
-        return f"quantity {proposal.legs[0].quantity:g} is not a whole number of contracts"
+        return f"quantity {_exact(proposal.legs[0].quantity)} is not a whole number of contracts"
     return None
 
 
@@ -438,8 +452,8 @@ def describe(order: ApprovedOrder | Order) -> str:
     """One line: ``buy 10 AAPL limit 200.5 day``."""
     intent = f" ({order.position_intent.value})" if order.position_intent is not None else ""
     return (
-        f"{order.side.value} {float(order.quantity):g} {order.symbol} limit"
-        f" {float(order.limit_price):g} day{intent}"
+        f"{order.side.value} {_exact(order.quantity)} {order.symbol} limit"
+        f" {_exact(order.limit_price)} day{intent}"
     )
 
 
@@ -642,7 +656,16 @@ def place(
                 regate_decision_id=regate.id,
             ))
         raise PlacementError(f"place order ({why_not})", decision_id)
-    approved = mint(proposal, verdict, regate, approval, context)
+    try:
+        approved = mint(proposal, verdict, regate, approval, context)
+    except PlacementError as exc:
+        if not dry_run:  # the re-check is on record; so is why nothing followed it
+            log_event(conn, _event(
+                _now(clock), EventLevel.WARNING, ORDER_REFUSED,
+                f"decision {verdict.id}: {exc.what}", decision_id=verdict.id,
+                regate_decision_id=regate.id,
+            ))
+        raise
     if dry_run:
         return Placement(regate, None, (
             f"would place {approved.client_order_id}: {describe(approved)}",
@@ -1010,9 +1033,12 @@ def tick(
     clock: Clock = wall_clock,
 ) -> Report:
     """One pass of the loop: ``sync``, then ``stand_down``, then ``place``
-    every decision that may still go, while the controls are clear and
-    ``broker.enabled`` is on. A refused placement is a line, not a failure;
-    a broker or store problem is a failure."""
+    every decision that may still go, while the controls are clear,
+    ``broker.enabled`` is on, and sync and stand-down resolved everything
+    (an account that could not be fully read is no account to add an order
+    to). A placement refused before the broker (by the verdict, the
+    re-check or the claim) is a line, not a failure; one the broker refused,
+    never received or may have received is a failure."""
     venue = _broker(conn, config, broker_factory)
     report = _sync(conn, venue, config, clock)
     report = report + _stand_down(conn, venue, config, clock, broker_factory)
@@ -1020,6 +1046,8 @@ def tick(
         return report + Report(("placing nothing: the controls say stop",))
     if not config.broker.enabled:
         return report + Report(("placing nothing: broker.enabled is false",))
+    if report.failures:
+        return report + Report(("placing nothing: the broker could not be fully read",))
     for decision_id in _candidates(conn, config, _now(clock)):
         try:
             placement = place(
@@ -1027,7 +1055,7 @@ def tick(
                 broker=venue,
             )
         except PlacementError as exc:
-            failed = exc.outcome == ExecutionOutcome.UNKNOWN.value
+            failed = exc.outcome is not None  # it reached, or may have reached, the broker
             report = report + Report((f"decision {decision_id}: {_one_line(exc)}",), int(failed))
             continue
         report = report + Report(placement.lines, 0, (placement.order,) if placement.order else ())
