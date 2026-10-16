@@ -663,7 +663,8 @@ def limit_price_sanity(proposal: ProposalUnderReview, context: PolicyContext) ->
 
 
 def options_min_dte(proposal: ProposalUnderReview, context: PolicyContext) -> RuleResult:
-    """REJECT an option proposal with any leg closer to expiry than ``min_dte``."""
+    """REJECT an option proposal with any leg closer to expiry than ``min_dte``
+    — unless it is a closing sale of a contract held long."""
     name = "options_min_dte"
     key = "risk_limits.min_dte"
     if not proposal.is_option:
@@ -672,6 +673,14 @@ def options_min_dte(proposal: ProposalUnderReview, context: PolicyContext) -> Ru
         return _rejected(name, f"the option proposal has no legs to check ({key})")
     floor = context.limits.min_dte
     days = [(leg.symbol, leg_dte(leg, context)) for leg in proposal.legs]
+    if is_closing_sale(proposal, context):
+        # The floor keeps new positions away from expiry; it must not trap a
+        # held one there.
+        nearest = min(dte for _, dte in days)
+        return _passed(
+            name, f"a closing sale at {nearest} DTE: the minimum of {_count(floor)} applies to "
+            f"opening trades ({key})"
+        )
     short = [f"{symbol} at {dte} DTE" for symbol, dte in days if dte < floor]
     if short:
         return _rejected(name, f"{'; '.join(short)}: below the minimum of {_count(floor)} ({key})")
@@ -684,7 +693,8 @@ def options_max_loss(proposal: ProposalUnderReview, context: PolicyContext) -> R
     option structure that cannot be analysed, an "equity" that carries legs
     or names an option contract — and an option structure whose max loss is
     above ``max_loss_per_trade``, cannot be established, or is unlimited:
-    the last unconditionally, whatever the limit says."""
+    the last unconditionally, whatever the limit says. A closing sale of a
+    contract held long adds no risk and PASSes (its shape is still judged)."""
     name = "options_max_loss"
     key = "risk_limits.max_loss_per_trade"
     # The shape is judged first, for every proposal: a mislabelled option
@@ -699,6 +709,10 @@ def options_max_loss(proposal: ProposalUnderReview, context: PolicyContext) -> R
         return _rejected(name, f"{what}: {'; '.join(problems)}")
     if not proposal.is_option:
         return _passed(name, "not an option")
+    if is_closing_sale(proposal, context):
+        # The analysis prices the sale as if it wrote the contract; selling
+        # back one the account holds long opens nothing and risks nothing.
+        return _passed(name, f"{_trade(proposal)} closes a long option position: no new risk")
     analysis = context.analysis
     if analysis is None:
         return _rejected(name, "cannot evaluate max loss: no position analysis for the structure")

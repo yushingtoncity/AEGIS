@@ -138,18 +138,40 @@ def long_quantity(context: PolicyContext, symbol: str) -> float | None:
 
 
 def is_closing_sale(proposal: ProposalUnderReview, context: PolicyContext) -> bool:
-    """True only for an EQUITY SELL of no more than the long position held in
-    the proposal's symbol. Unknown positions can prove nothing: False. Nor
-    can a sale close a long that is not there: with nothing held long it is
-    False however small the sale — ``exceeds`` alone would call a billionth
-    of a share "not above" a holding of zero."""
+    """True only for a SELL of no more than the long position held in what
+    it sells: an EQUITY sell against the shares held in the proposal's
+    symbol, or a sound single-leg OPTION sell against the contracts held in
+    that leg's contract. Selling a held option back opens nothing and adds
+    no risk; anything else that sells an option — a spread, a call against
+    shares, a contract not held — writes one, and is not a close.
+
+    Unknown positions can prove nothing: False. Nor can a sale close a long
+    that is not there: with nothing held long it is False however small the
+    sale — ``exceeds`` alone would call a billionth of a share "not above" a
+    holding of zero."""
     order = proposal.proposal
-    if not proposal.is_equity or order.side is not OrderSide.SELL:
+    if order.side is not OrderSide.SELL:
         return False
-    held = long_quantity(context, order.symbol)
+    if proposal.is_equity:
+        symbol, quantity = order.symbol, order.quantity
+    elif proposal.is_option and _sells_one_contract(proposal):
+        leg = proposal.legs[0]
+        symbol, quantity = leg.symbol, leg.quantity
+    else:
+        return False
+    held = long_quantity(context, symbol)
     if held is None or held <= 0:
         return False
-    return not exceeds(order.quantity, held)
+    return not exceeds(quantity, held)
+
+
+def _sells_one_contract(proposal: ProposalUnderReview) -> bool:
+    """Whether an option proposal is one sound leg that sells: the only
+    shape whose sale can close a held contract. A malformed structure never
+    can — its leg symbol may not be the contract the order would trade."""
+    if len(proposal.legs) != 1 or proposal.legs[0].side is not OrderSide.SELL:
+        return False
+    return not structure_problems(proposal)
 
 
 def exposure(context: PolicyContext, underlying: str) -> float | None:
