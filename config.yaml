@@ -216,3 +216,18 @@ notify:
   lookback_minutes: 60           # events older than this are never sent: a first run (or one after a long outage) does not replay history
   max_attempts: 3                # a notice that failed this many times is given up on (each failure is a notify_failed event)
   max_per_run: 20                # at most this many pushes per run, oldest first; the rest wait for the next run (a run can take max_per_run x timeout_seconds = 200 s at worst, so from cron run it every 5 minutes or slower: two runs at once can push the same notice twice)
+
+# Read-only proposal scorecard (python -m aegis.cli.scorecard). Grades past
+# proposals by what the underlying did afterwards, so models (and, later, new
+# news sources) can be compared on the same yardstick. It never writes to the
+# store and never touches the broker.
+scorecard:
+  # Trading sessions after the proposal at which its call is checked: the next
+  # close, about a week, about two weeks. A horizon that has not closed yet
+  # shows as pending. PLACEHOLDER until there are enough proposals to tell
+  # which horizon matches how long AEGIS actually holds.
+  horizons_days: [1, 5, 10]
+  # Net delta per share (from the cycle's stored chain Greeks) below which an
+  # option structure is non-directional (a condor, a straddle) and is left out
+  # of hit rates. 0.10 is about what a balanced iron condor shows.
+  neutral_delta: 0.10

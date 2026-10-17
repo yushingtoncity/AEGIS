@@ -374,6 +374,30 @@ class NotifyConfig(BaseModel):
         return cleaned
 
 
+class ScorecardConfig(BaseModel):
+    """How the read-only proposal scorecard grades past proposals.
+
+    ``horizons_days`` are counted in trading sessions that closed after the
+    proposal was made; ``neutral_delta`` is the per-share net delta below
+    which an option structure counts as non-directional and is not graded
+    on direction.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+
+    horizons_days: tuple[int, ...] = Field(default=(1, 5, 10), min_length=1)
+    neutral_delta: float = Field(default=0.10, ge=0, lt=1)
+
+    @field_validator("horizons_days")
+    @classmethod
+    def _sorted_positive(cls, value: tuple[int, ...]) -> tuple[int, ...]:
+        if any(days <= 0 for days in value):
+            raise ValueError("every scorecard horizon must be at least 1 trading day")
+        if len(set(value)) != len(value):
+            raise ValueError("scorecard horizons must not repeat")
+        return tuple(sorted(value))
+
+
 class AegisConfig(BaseModel):
     """The validated contents of config.yaml."""
 
@@ -388,6 +412,7 @@ class AegisConfig(BaseModel):
     risk_limits: RiskLimits = RiskLimits()
     broker: BrokerConfig = BrokerConfig()
     notify: NotifyConfig = NotifyConfig()
+    scorecard: ScorecardConfig = ScorecardConfig()
 
     @field_validator("watchlist")
     @classmethod
