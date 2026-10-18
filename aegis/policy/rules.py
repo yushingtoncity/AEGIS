@@ -815,15 +815,23 @@ def auto_tier(proposal: ProposalUnderReview, context: PolicyContext) -> RuleResu
     enabled, a plain equity (declared equity, no legs, not an option
     symbol), a buy or a closing sale, a limit order, a watchlist symbol, and
     a known notional within a positive ``auto_execute.max_notional``.
-    Anything else is ESCALATEd, with every unmet criterion listed."""
+    Anything else is ESCALATEd, with every unmet criterion listed. An option
+    never qualifies; a closing sale of one held long is not held to the
+    notional cap, which would price it as writing the contract."""
     name = "auto_tier"
     key = "risk_limits.auto_execute"
     order = proposal.proposal
     auto = context.limits.auto_execute
+    closes_an_option = proposal.is_option and is_closing_sale(proposal, context)
     unmet = []
     if not auto.enabled:
         unmet.append(f"auto-execute is disabled ({key}.enabled)")
-    if not proposal.is_equity:
+    if closes_an_option:
+        unmet.append(
+            f"the instrument is {order.instrument.value}, not equity "
+            "(closing a long option position still needs approval)"
+        )
+    elif not proposal.is_equity:
         unmet.append(f"the instrument is {order.instrument.value}, not equity")
     elif not is_plain_equity(proposal):
         unmet.append("not a plain equity: " + "; ".join(structure_problems(proposal)))
@@ -839,14 +847,19 @@ def auto_tier(proposal: ProposalUnderReview, context: PolicyContext) -> RuleResu
             f"the tier admits nothing: max_notional is {money(auto.max_notional)} "
             f"({key}.max_notional)"
         )
-    cost = notional(proposal, context)
-    if cost is None:
-        unmet.append("the notional cannot be computed")
-    elif auto.max_notional > 0 and exceeds(cost, auto.max_notional):
-        unmet.append(
-            f"notional {money(cost)} is above {money(auto.max_notional)}"
-            f"{_by(cost, auto.max_notional)} ({key}.max_notional)"
-        )
+    # ``notional`` prices any option sale as the structure's max loss, so a
+    # single sold call reads "unlimited". Selling back a held one commits
+    # nothing, and the instrument criterion above already escalates it.
+    cost = None
+    if not closes_an_option:
+        cost = notional(proposal, context)
+        if cost is None:
+            unmet.append("the notional cannot be computed")
+        elif auto.max_notional > 0 and exceeds(cost, auto.max_notional):
+            unmet.append(
+                f"notional {money(cost)} is above {money(auto.max_notional)}"
+                f"{_by(cost, auto.max_notional)} ({key}.max_notional)"
+            )
     if unmet:
         return _escalated(name, "needs approval: " + "; ".join(unmet))
     return _passed(

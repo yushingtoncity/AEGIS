@@ -4640,6 +4640,35 @@ class TestAutoTier:
         assert result.detail == "needs approval: TSLA is not in the watchlist"
         assert non_pass(closing, context) == {"auto_tier": ESCALATE}
 
+    def test_an_option_closing_sale_escalates_without_an_unlimited_notional(self):
+        # ``notional`` prices a single sold call as if it wrote one: unlimited.
+        # Selling back calls held long commits nothing, so the detail must
+        # not quote that figure, and the close still needs a human.
+        closing = sell_call(1)
+        context = holding_calls(5)
+        assert is_closing_sale(closing, context)
+        result = run(rules.auto_tier, closing, context)
+        assert result.outcome is ESCALATE
+        assert "unlimited" not in result.detail and "notional" not in result.detail
+        assert result.detail == (
+            "needs approval: the instrument is option, not equity "
+            "(closing a long option position still needs approval)"
+        )
+        # Nothing rejects it and auto_tier escalates: NEEDS_APPROVAL, as before.
+        assert non_pass(closing, context) == {
+            "options_escalate": ESCALATE, "auto_tier": ESCALATE,
+        }
+
+    def test_an_option_closing_sale_still_lists_every_other_unmet_criterion(self):
+        closing = sell_call(1)
+        off = make_limits(auto_execute={"enabled": False, "max_notional": 0.0})
+        context = holding_calls(5, limits=off)
+        result = run(rules.auto_tier, closing, context)
+        assert result.outcome is ESCALATE
+        assert "auto-execute is disabled" in result.detail
+        assert "the tier admits nothing" in result.detail
+        assert "unlimited" not in result.detail
+
     def test_a_closing_sale_without_a_usable_limit_price_escalates(self):
         for price in (None, 0.0, -200.0):
             closing = sell(2, limit_price=price)
