@@ -814,6 +814,32 @@ while `pending` and `test` work either way. Until the Phase 9 daemon runs
 slower: a run can take `max_per_run` x `timeout_seconds` at worst, and two
 runs at once can send the same notice twice.
 
+## Proposal scorecard
+
+`python -m aegis.cli.scorecard` grades every stored proposal by what the
+underlying did afterwards, so models (and, later, new news sources) can be
+compared on one yardstick. It is read-only: the database is opened with
+`PRAGMA query_only`, nothing under `aegis/scorecard` imports the execution,
+policy, notify or broker code, and `tests/test_scorecard.py` checks both.
+
+```
+python -m aegis.cli.scorecard                       # summary per proposal-stage model
+python -m aegis.cli.scorecard --group-by pair       # thesis -> proposal model pair (also: thesis, symbol)
+python -m aegis.cli.scorecard --since 2026-10-01 --detail   # plus one block per proposal
+python -m aegis.cli.scorecard --json                # for scripts
+```
+
+Each proposal gets a call: an equity buy is bullish, a sell bearish, and an
+option structure takes the sign of its net delta from the Greeks its cycle's
+snapshot stored (under `scorecard.neutral_delta` it is neutral and not
+graded). The entry is the spot the brain saw in that snapshot, and the
+underlying's close `scorecard.horizons_days` sessions later decides hit or
+miss; sessions that have not closed yet show as pending. Options are graded
+on the underlying, not their own price (the free plan has no option price
+history). The summary shows hit rate, average signed return, average
+confidence and the Brier score (lower is better; 0.25 is a coin flip). Later
+closes come from Alpaca daily bars, so it runs where the keys are.
+
 ## Repo layout
 
 ```
@@ -826,8 +852,9 @@ aegis/
   brain/             scan -> thesis -> proposal: llm client, prompts/, snapshot, stages, cycle
   policy/            the deterministic gate: models, context, measures, rules, engine, limits
   execution/         the broker boundary: base (the Executor interface), models, paper (PaperExecutor)
-  cli/               operator tools: check, snapshot, db, trace, brain, policy, orders, notify
+  cli/               operator tools: check, snapshot, db, trace, brain, policy, orders, notify, scorecard
   notify/            Phase 7 notifications: outbox (what is due, sent once), imessage / slack / ntfy
+  scorecard/         read-only grading of past proposals: gather (store join), grade (pure)
   dashboard/         stub for Phase 8
 tests/               config, cache, model-parsing, pricing, position, store, brain, policy and execution tests (canned JSON, FakeLLM, fake broker clients, hand-built contexts, tmp_path DBs)
 docs/phase5/         working documents of the policy-engine phase: spec, decisions, review rulings

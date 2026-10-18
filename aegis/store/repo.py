@@ -1365,6 +1365,24 @@ def get_cycle_reasoning(conn: sqlite3.Connection, cycle_id: str) -> list[Reasoni
         raise StoreError("get cycle reasoning", cycle_id, exc) from exc
 
 
+def get_cycle_events(conn: sqlite3.Connection, cycle_id: str, kind: str) -> list[Event]:
+    """Every ``kind`` event whose payload names ``cycle_id``, oldest first.
+
+    The brain journals ``market_snapshot`` and ``model_selection`` events
+    with a top-level ``cycle_id`` key in the payload; this is how the
+    scorecard finds a cycle's stored spot prices, Greeks and model choices.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT * FROM events WHERE kind = ? AND json_valid(payload)"
+            " AND json_extract(payload, '$.cycle_id') = ? ORDER BY occurred_at, rowid",
+            (kind, cycle_id),
+        ).fetchall()
+        return [_row_to_event(row) for row in rows]
+    except _REPO_ERRORS as exc:
+        raise StoreError("get cycle events", f"{cycle_id} {kind}", exc) from exc
+
+
 def get_token_usage(conn: sqlite3.Connection, day: date | None = None) -> TokenUsage:
     """Tokens in/out and rows written to ``reasoning`` on ``day`` (a UTC calendar
     day; default today).
@@ -1653,6 +1671,24 @@ def get_proposals_since(conn: sqlite3.Connection, since: datetime) -> list[Propo
         return [_row_to_proposal(row) for row in rows]
     except _REPO_ERRORS as exc:
         raise StoreError("get proposals since", str(since), exc) from exc
+
+
+def get_proposals_between(
+    conn: sqlite3.Connection, since: datetime | None = None, until: datetime | None = None
+) -> list[Proposal]:
+    """Every proposal created in ``[since, until)`` (naive taken as UTC; either
+    bound may be None for open-ended), oldest first, ties on rowid."""
+    low = _iso(_utc(since, "since")) if since is not None else None
+    high = _iso(_utc(until, "until")) if until is not None else None
+    try:
+        rows = conn.execute(
+            "SELECT * FROM proposals WHERE (? IS NULL OR created_at >= ?)"
+            " AND (? IS NULL OR created_at < ?) ORDER BY created_at, rowid",
+            (low, low, high, high),
+        ).fetchall()
+        return [_row_to_proposal(row) for row in rows]
+    except _REPO_ERRORS as exc:
+        raise StoreError("get proposals between", f"{since} {until}", exc) from exc
 
 
 def get_latest_undecided_proposal(conn: sqlite3.Connection) -> Proposal | None:
