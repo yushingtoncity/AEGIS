@@ -2,13 +2,16 @@
 edge cases — pure functions, no live API calls."""
 
 import math
-import time
+import os
+import subprocess
+import sys
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import numpy as np
 import pytest
 
+from aegis.config import REPO_ROOT
 from aegis.data.models import ChainSnapshot, OptionSnapshot, OptionType
 from aegis.pricing.black_scholes import (
     call_price,
@@ -489,20 +492,34 @@ class TestTimeToExpiry:
         assert winter == datetime(2026, 12, 18, 21, 0, tzinfo=timezone.utc)
         assert summer.tzinfo is timezone.utc
 
-    def test_naive_now_is_treated_as_utc(self, monkeypatch):
+    def test_naive_now_is_treated_as_utc(self):
         # Pin a non-UTC local zone so "naive means UTC" and "naive means
-        # local time" differ wherever the suite runs (CI boxes are UTC).
-        monkeypatch.setenv("TZ", "Asia/Tokyo")
-        time.tzset()
-        try:
-            naive = datetime(2026, 8, 21, 19, 0)  # one hour before the 20:00 UTC close
-            assert time_to_expiry(self.EXPIRY, naive) == 3600 / (86400 * 365)
-            assert time_to_expiry(self.EXPIRY, naive) == time_to_expiry(
-                self.EXPIRY, naive.replace(tzinfo=timezone.utc)
-            )
-        finally:
-            monkeypatch.undo()
-            time.tzset()
+        # local time" differ wherever the suite runs (CI boxes are UTC). The
+        # zone is set before a child interpreter starts rather than with
+        # time.tzset(), which Windows lacks; the POSIX-style "JST-9" (UTC+9)
+        # is honoured by glibc, macOS and the Windows C runtime alike. The
+        # child first proves the pin took, so a platform that ignored TZ
+        # fails here instead of passing without testing anything.
+        script = (
+            "from datetime import date, datetime, timedelta, timezone\n"
+            "from aegis.pricing.time_to_expiry import time_to_expiry\n"
+            "naive = datetime(2026, 8, 21, 19, 0)\n"  # one hour before the 20:00 UTC close
+            "assert naive.astimezone().utcoffset() == timedelta(hours=9), naive.astimezone()\n"
+            f"expiry = date.fromisoformat({self.EXPIRY.isoformat()!r})\n"
+            "assert time_to_expiry(expiry, naive) == 3600 / (86400 * 365)\n"
+            "assert time_to_expiry(expiry, naive) == time_to_expiry(\n"
+            "    expiry, naive.replace(tzinfo=timezone.utc)\n"
+            ")\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=REPO_ROOT,
+            env={**os.environ, "TZ": "JST-9", "PYTHONDONTWRITEBYTECODE": "1"},
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert result.returncode == 0, result.stderr
 
     def test_fractional_days_survive(self):
         # 0-3 DTE contracts keep their hours instead of rounding to zero.
