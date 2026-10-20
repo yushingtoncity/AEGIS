@@ -74,14 +74,14 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 
 ## Open issues
 
-1. README.md refresh: resolved. The intro, Policy engine note, Agent brain stage table, Setup note on `ANTHROPIC_API_KEY`, Roadmap and repo layout now match the code; Execution, Notifications and Proposal scorecard were already current. [Code]
+1. README.md refresh: resolved. The intro, Policy engine note, Store and Agent brain sections, Setup note on `ANTHROPIC_API_KEY`, Roadmap and repo layout now match the code; Execution, Notifications and Proposal scorecard were already current. "Until Phase 4" wording remains in `aegis/cli/check.py` and `.env.example` (code and config, out of scope for a docs PR). [Code]
 2. Mac runtime checks pending: update the Mac to main, first scorecard run, notification test, brain model-selection check. [Reported]
 3. Merged feature branches remain on the remote, every one an ancestor of main (`git ls-remote --heads origin`, `git merge-base --is-ancestor`): `claude/auto-latest-models-z7rxu6`, `claude/offline-aegis-work-5sytso`, `claude/option-close-tier-detail-8pa3e5`, `claude/project-thread-tycmn6`, `claude/proposal-scorecard-pzq07u`, `claude/vigilant-johnson-h8jcnq`, `claude/windows-test-portability-agent-rules`, `phase-5-policy-engine`. Deleting them needs owner approval. [Code]
 4. `notify.enabled` is validated as a plain `bool` while `broker.enabled` uses `StrictBool` (`aegis/config.py`). Aligning them is an owner decision. [Code]
 
 ## Next priorities (set by owner)
 
-1. Done: README refresh (docs PR). [Reported]
+1. README refresh: done in this PR. [Reported]
 2. Mac runtime checks (above). [Reported]
 3. Delete merged remote branches (owner approval). [Reported]
 4. Choose the next track: the Phase 8 read-only dashboard or the research roadmap built on scorecard evidence. [Reported]

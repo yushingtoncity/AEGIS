@@ -16,7 +16,11 @@ Paper trading only. `broker.enabled` and `notify.enabled` ship `false` in
 `config.yaml`, so no order is sent and no notice goes out until the operator
 turns them on. The dashboard (Phase 8) is a stub and there is no Phase 9
 daemon: the brain, the orders CLI and the notifier run when someone runs
-them.
+them, by hand or from cron. Not every order waits for a human:
+`risk_limits.auto_execute.enabled` ships `true`, so with `broker.enabled` on,
+anything that runs `python -m aegis.cli.orders tick` can place an
+`AUTO_EXECUTE` equity order without a click, while options always need a
+human approval.
 
 ## Architecture principles
 
@@ -252,7 +256,7 @@ order and its fills are never rewritten or deleted. An approval tied to a
 decision sits on that decision's proposal and is answered once.
 `upsert_order` and `record_fill` keep working for rows written before
 Phase 6 and refuse the new ones. The design is in `docs/phase6/SPEC_PHASE6.md`; the executor
-and the CLI that use these come in the next two PRs.
+and the orders CLI that use these are described under Execution, below.
 
 ## Agent brain (Phase 4)
 
@@ -282,7 +286,10 @@ own model from `brain.stages` in `config.yaml`. As shipped, each stage sets
 the Models API list once and the stage calls the newest model of that
 family; `model` is the pinned fallback, used when the list call fails or
 finds nothing, and `track: null` pins the stage to `model`. Every cycle logs
-a `model_selection` event saying which model each stage got and why.
+a `model_selection` event saying which model each stage got and why. The
+code defaults in `aegis/config.py` differ: a stage missing from
+`brain.stages` gets an untracked pin, `claude-haiku-4-5-20251001` for scan,
+`claude-opus-5-5` for thesis and `claude-fable-5-1` for proposal.
 
 | Stage | Shipped model (`config.yaml`) | Input | Output |
 | ----- | ----------------------------- | ----- | ------ |
@@ -374,11 +381,13 @@ to the reasoning table (with whatever the model returned) before the
 
 Note on the API surface: the current Messages API and `anthropic` 1.x SDK
 have no `temperature` parameter for these models; the per-stage knob is
-`effort` (thinking is always on for Opus 5.5 and Fable 5.1 and counts toward
+`effort` (thinking is always on for the 5.x models and counts toward
 `max_tokens`). That is why the per-stage `max_tokens` are 3,000 / 4,000 /
-3,000 rather than the initial 1,500 / 2,000 / 800: live runs truncated at the
-smaller caps (a terse five-symbol brief needs ~1,700 tokens; the proposal
-stage spent ~670 thinking before its ~500-token JSON began). A truncated
+3,000 in the code defaults rather than the initial 1,500 / 2,000 / 800: live
+runs truncated at the smaller caps (a terse five-symbol brief needs ~1,700
+tokens; the proposal stage spent ~670 thinking before its ~500-token JSON
+began). The shipped `config.yaml` raises scan to 4,000 because Haiku 5.5
+thinks by default (a placeholder until its first cycles are measured). A truncated
 answer is never retried — it is a configuration problem, and the error names
 the key to raise. `ANTHROPIC_API_KEY` is read from `.env` like the Alpaca keys.
 
@@ -403,7 +412,8 @@ context always produce the same verdict. Every proposal gets exactly one of
 four verdicts — `REJECT`, `FLAG_ONLY`, `NEEDS_APPROVAL` or `AUTO_EXECUTE` —
 and `AUTO_EXECUTE` is unreachable unless every one of the twenty-one rules
 passed. The engine itself only records verdicts; placing an order is the
-dispatcher's job, with `broker.enabled` on (see Execution, below).
+dispatcher's job, with `broker.enabled` on (see Execution, below), and an
+`AUTO_EXECUTE` equity verdict is placed there without a human approval.
 
 It is also the only package that may ever reference an `Executor`.
 `tests/test_policy_architecture.py` statically scans every module outside
@@ -896,4 +906,4 @@ docs/STATUS.md       canonical current status: components, safety defaults, test
 | after 7 | Proposal scorecard: read-only grading of past proposals (shipped) |
 | 8     | Dashboard (not built; `aegis/dashboard` is a stub) |
 | 9     | Daemon: scheduled autonomous loop (not built) |
-| 10    | Paper campaign: supervised live-paper trading run |
+| 10    | Paper campaign: supervised live-paper trading run (not built) |
