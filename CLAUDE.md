@@ -1,7 +1,8 @@
 # AEGIS: rules for Claude Code
 
 AEGIS is an agentic trading platform. Read README.md for the architecture and
-phase history. This file lists the rules every Claude Code session must follow
+phase history. Read docs/STATUS.md for current verified status before starting a task, and update it in the same pull request when status changes.
+This file lists the rules every Claude Code session must follow
 in this repo, whether it runs in the cloud or on the mini.
 
 Where an ECC rule under `.claude/rules/ecc/` conflicts with this file, this

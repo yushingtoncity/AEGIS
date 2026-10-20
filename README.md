@@ -1,5 +1,7 @@
 # AEGIS
 
+> Current status: see [docs/STATUS.md](docs/STATUS.md). Parts of this README predate Phases 6 and 7 and are due for a refresh.
+
 An agentic trading platform. Phase 0–5.1 status: project skeleton, the data
 layer (Alpaca paper account, stocks, options, news), a pure-math pricing
 engine, a SQLite audit log with operator CLIs, the agent brain that proposes
