@@ -14,7 +14,7 @@ If main has moved past `1cadcc3` with changes outside docs/, re-check before rel
 
 ## What AEGIS is
 
-AEGIS is an agentic trading platform on an Alpaca paper account. The LLM proposes and deterministic code disposes: the brain writes proposals to the store, and the policy engine gives each one a verdict. Only the policy engine's dispatcher calls an Executor, and the only Executor is the paper one. See README "Architecture principles" and CLAUDE.md "Non-negotiable invariants". [Code]
+AEGIS is an agentic trading platform on an Alpaca paper account. The LLM proposes and deterministic code disposes: the brain writes proposals to the store, and the policy engine gives each one a verdict. Only the policy engine's dispatcher calls an Executor, and the only production Executor is the paper one. See README "Architecture principles" and CLAUDE.md "Non-negotiable invariants". [Code]
 
 ## Component status
 
@@ -25,7 +25,7 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 | Store / audit log, `aegis/store` | active | [Code] |
 | Brain (scan, thesis, proposal), `aegis/brain` | active; stages can track the newest model per config (`aegis/brain/model_choice.py`, `brain.stages.*.track`) | [Code] |
 | Policy engine (21 rules), `aegis/policy` | active (`aegis/policy/rules.py`, `RULES`) | [Code] |
-| Execution | shipped, off by default (`broker.enabled: false`). `PaperExecutor` in `aegis/execution/paper.py` is the only Executor; its one caller is `aegis/policy/dispatch.py`; manual orders via `aegis/cli/orders.py` | [Code] |
+| Execution | shipped, off by default (`broker.enabled: false`). `PaperExecutor` in `aegis/execution/paper.py` is the only production Executor; its one caller is `aegis/policy/dispatch.py`; manual orders via `aegis/cli/orders.py` | [Code] |
 | Notifications, `aegis/notify` (iMessage, Slack, ntfy) | shipped, off by default (`notify.enabled: false`) | [Code] |
 | Proposal scorecard, `aegis/scorecard` and `aegis/cli/scorecard.py` | shipped, read-only | [Code] |
 | Dashboard, `aegis/dashboard` | stub; Phase 8 not approved | [Code] |
@@ -54,10 +54,10 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 | Role | Purpose | Last known commit | Label |
 | --- | --- | --- | --- |
 | GitHub main | source of truth | `1cadcc3` | [Code] |
-| Windows dev | development | main at `1cadcc3` when this file was written | [Code] |
+| Windows dev | development | main at `1cadcc3` when this file was written | [Reported] |
 | Mac runtime | paper operations | `fff521a`, one PR behind main | [Reported] |
 
-- PR #15 changed only `CLAUDE.md` and two test files (`git diff --stat fff521a 1cadcc3`), so the Mac's runtime code is identical to main. [Code]
+- PR #15 changed only `CLAUDE.md` and two test files (`git diff --stat fff521a 1cadcc3`). [Code] So if the Mac is at `fff521a`, as reported, its runtime code is identical to main.
 - Backups and credential-file permissions were set up on 2026-10-20; details are kept private. [Reported]
 
 ## Tests
@@ -70,7 +70,7 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 - Main `1cadcc3` has the same tree as `d7149a1`, so these results apply to main unchanged. [Code]
 - The Windows skip is intentional: `tests/test_brain_architecture.py::TestRuntime::test_the_harness_catches_a_load_by_any_name[symlink]` skips when the account can't create symlinks (Windows without Developer Mode or elevation). [Code]
 - Before PR #15, Windows had 3 portability failures; PR #15 fixed them in `tests/test_brain_architecture.py` and `tests/test_pricing.py`. Resolved. [Code] [Test]
-- Test policy: documentation-only changes don't need a new run. Rerun when code, tests, config or dependencies change, and record the counts with the commit.
+- Test policy: documentation-only changes don't need a new run. Rerun when code, tests, config or dependencies change, and record the counts with the commit. [Reported] (owner decision, 2026-10-20)
 
 ## Open issues
 
@@ -89,10 +89,10 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 
 ## Next priorities (set by owner)
 
-1. Refresh the outdated README sections (docs PR).
-2. Mac runtime checks (above).
-3. Delete merged remote branches (owner approval).
-4. Choose the next track: the Phase 8 read-only dashboard or the research roadmap built on scorecard evidence.
+1. Refresh the outdated README sections (docs PR). [Reported]
+2. Mac runtime checks (above). [Reported]
+3. Delete merged remote branches (owner approval). [Reported]
+4. Choose the next track: the Phase 8 read-only dashboard or the research roadmap built on scorecard evidence. [Reported]
 
 ## Recent changes
 
