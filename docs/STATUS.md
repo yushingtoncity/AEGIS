@@ -81,7 +81,7 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 
 ## Next priorities (set by owner)
 
-1. README refresh: done in this PR. [Reported]
+1. README refresh: done (PR #19). [Reported]
 2. Mac runtime checks (above). [Reported]
 3. Delete merged remote branches (owner approval). [Reported]
 4. Choose the next track: the Phase 8 read-only dashboard or the research roadmap built on scorecard evidence. [Reported]

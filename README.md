@@ -64,7 +64,7 @@ copy .env.example .env         # POSIX: cp .env.example .env
 
 `ANTHROPIC_API_KEY` is needed only by the brain (`python -m aegis.cli.brain`),
 and the notification keys only for the channel `notify.channel` names (see
-Notifications, below). `.env` is gitignored —
+Notifications, below). `.env` is gitignored:
 never commit keys, never put them in `config.yaml`.
 
 ## Running
