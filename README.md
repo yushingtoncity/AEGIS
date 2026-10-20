@@ -1,14 +1,26 @@
 # AEGIS
 
-> Current status: see [docs/STATUS.md](docs/STATUS.md). Parts of this README predate Phases 6 and 7 and are due for a refresh.
+> Current status: see [docs/STATUS.md](docs/STATUS.md).
 
-An agentic trading platform. Phase 0–5.1 status: project skeleton, the data
-layer (Alpaca paper account, stocks, options, news), a pure-math pricing
-engine, a SQLite audit log with operator CLIs, the agent brain that proposes
-trades into that log, and the deterministic policy engine that gives every
-proposal a verdict. Phase 5.1 keeps the brain's option chains at or past the
-policy's DTE floor and adds a quote-age rule to the engine. Nothing trades yet — by design: there is no Executor
-implementation until Phase 6, so a verdict is all that happens to a proposal.
+An agentic trading platform on an Alpaca paper account. Phases 0 through 7
+are shipped: project skeleton, the data layer (Alpaca paper account, stocks,
+options, news), a pure-math pricing engine, a SQLite audit log with operator
+CLIs, the agent brain that proposes trades into that log, the deterministic
+policy engine that gives every proposal a verdict, paper execution
+(`PaperExecutor` in `aegis/execution/paper.py`, called only by the
+dispatcher in `aegis/policy/dispatch.py`, which the orders CLI drives), and
+notifications from the event log (`aegis/notify`). A read-only proposal
+scorecard grades past proposals against what the underlying did next.
+
+Paper trading only. `broker.enabled` and `notify.enabled` ship `false` in
+`config.yaml`, so no order is sent and no notice goes out until the operator
+turns them on. The dashboard (Phase 8) is a stub and there is no Phase 9
+daemon: the brain, the orders CLI and the notifier run when someone runs
+them, by hand or from cron. Not every order waits for a human:
+`risk_limits.auto_execute.enabled` ships `true`, so with `broker.enabled` on,
+anything that runs `python -m aegis.cli.orders tick` can place an
+`AUTO_EXECUTE` equity order without a click, while options always need a
+human approval.
 
 ## Architecture principles
 
@@ -20,8 +32,9 @@ implementation until Phase 6, so a verdict is all that happens to a proposal.
 2. **Execution is an abstraction.** `aegis/execution/base.py` defines an
    abstract `Executor` interface so a paper broker and a live broker are
    swappable implementations behind the same seam. Only the policy engine may
-   reference an Executor — `tests/test_policy_architecture.py` fails if any
-   other module does.
+   reference an Executor: `tests/test_policy_architecture.py` fails if any
+   other module does, and `tests/test_brain_architecture.py` separately fails
+   if anything under `aegis/brain` imports `aegis.execution`.
 
 Supporting rules: all external reads go through `aegis/data` and return typed
 pydantic models (every one carrying a `fetched_at` UTC timestamp), never raw
@@ -49,7 +62,9 @@ pip install -r requirements.txt
 copy .env.example .env         # POSIX: cp .env.example .env
 ```
 
-`ANTHROPIC_API_KEY` can stay empty until Phase 4. `.env` is gitignored —
+`ANTHROPIC_API_KEY` is needed only by the brain (`python -m aegis.cli.brain`),
+and the notification keys only for the channel `notify.channel` names (see
+Notifications, below). `.env` is gitignored:
 never commit keys, never put them in `config.yaml`.
 
 ## Running
@@ -241,7 +256,7 @@ order and its fills are never rewritten or deleted. An approval tied to a
 decision sits on that decision's proposal and is answered once.
 `upsert_order` and `record_fill` keep working for rows written before
 Phase 6 and refuse the new ones. The design is in `docs/phase6/SPEC_PHASE6.md`; the executor
-and the CLI that use these come in the next two PRs.
+and the orders CLI that use these are described under Execution, below.
 
 ## Agent brain (Phase 4)
 
@@ -266,13 +281,21 @@ that makes `aegis.execution` unimportable in every brain test.
 Each cycle (`aegis.brain.cycle.run_cycle`) gets a `cycle_id`, logs
 `cycle_start`, records the market snapshot it saw as an event, then runs
 three stages, each with its own pydantic input and output models and its
-own model from `brain.stages` in `config.yaml`:
+own model from `brain.stages` in `config.yaml`. As shipped, each stage sets
+`track`, so at the start of every cycle `aegis/brain/model_choice.py` reads
+the Models API list once and the stage calls the newest model of that
+family; `model` is the pinned fallback, used when the list call fails or
+finds nothing, and `track: null` pins the stage to `model`. Every cycle logs
+a `model_selection` event saying which model each stage got and why. The
+code defaults in `aegis/config.py` differ: a stage missing from
+`brain.stages` gets an untracked pin, `claude-haiku-4-5-20251001` for scan,
+`claude-opus-5-5` for thesis and `claude-fable-5-1` for proposal.
 
-| Stage | Default model | Input | Output |
-| ----- | ------------- | ----- | ------ |
-| **scan** | `claude-haiku-4-5-20251001` | the watchlist snapshot: spot, the chain of the nearest expiration 7–45 DTE (ATM ± 5; see "Which expiration") with IV and Greeks from the vendor or our pricing engine, headlines, account and positions, data-age flags | `ScanBrief`: per-symbol summary, IV/skew observations, catalysts, staleness warnings |
-| **thesis** | `claude-opus-5-5` | the brief, positions, a read-only summary of `risk_limits`, recent proposals from the store (so it does not repeat itself), the contracts actually available | `ThesisOutput`: zero or more `ThesisCandidate`s (symbol, direction, instrument/structure, rationale, confidence, key risk, invalidation). Empty with a reason is a respectable answer |
-| **proposal** | `claude-fable-5-1` | the best candidate resolved to concrete contracts with live quotes, the pricing engine's max loss / max profit / breakevens / net Greeks for the structure, account state | `ProposalOutput`: a `TradeProposal` (symbol, instrument, side, quantity, order type, limit price, thesis, confidence, invalidation, legs) **or** `no_trade` with a reason |
+| Stage | Shipped model (`config.yaml`) | Input | Output |
+| ----- | ----------------------------- | ----- | ------ |
+| **scan** | newest Haiku (`track: haiku`; fallback `claude-haiku-5-5`) | the watchlist snapshot: spot, the chain of the nearest expiration 7–45 DTE (ATM ± 5; see "Which expiration") with IV and Greeks from the vendor or our pricing engine, headlines, account and positions, data-age flags | `ScanBrief`: per-symbol summary, IV/skew observations, catalysts, staleness warnings |
+| **thesis** | newest Opus (`track: opus`; fallback `claude-opus-5-5`) | the brief, positions, a read-only summary of `risk_limits`, recent proposals from the store (so it does not repeat itself), the contracts actually available | `ThesisOutput`: zero or more `ThesisCandidate`s (symbol, direction, instrument/structure, rationale, confidence, key risk, invalidation). Empty with a reason is a respectable answer |
+| **proposal** | newest Opus (`track: opus`; fallback `claude-opus-5-5`), not Fable, until the scorecard can compare them | the best candidate resolved to concrete contracts with live quotes, the pricing engine's max loss / max profit / breakevens / net Greeks for the structure, account state | `ProposalOutput`: a `TradeProposal` (symbol, instrument, side, quantity, order type, limit price, thesis, confidence, invalidation, legs) **or** `no_trade` with a reason |
 
 Model output is constrained JSON (the API's structured outputs, with a
 schema derived from the pydantic model) and is then validated locally.
@@ -358,11 +381,13 @@ to the reasoning table (with whatever the model returned) before the
 
 Note on the API surface: the current Messages API and `anthropic` 1.x SDK
 have no `temperature` parameter for these models; the per-stage knob is
-`effort` (thinking is always on for Opus 5.5 and Fable 5.1 and counts toward
+`effort` (thinking is always on for the 5.x models and counts toward
 `max_tokens`). That is why the per-stage `max_tokens` are 3,000 / 4,000 /
-3,000 rather than the initial 1,500 / 2,000 / 800: live runs truncated at the
-smaller caps (a terse five-symbol brief needs ~1,700 tokens; the proposal
-stage spent ~670 thinking before its ~500-token JSON began). A truncated
+3,000 in the code defaults rather than the initial 1,500 / 2,000 / 800: live
+runs truncated at the smaller caps (a terse five-symbol brief needs ~1,700
+tokens; the proposal stage spent ~670 thinking before its ~500-token JSON
+began). The shipped `config.yaml` raises scan to 4,000 because Haiku 5.5
+thinks by default (a placeholder until its first cycles are measured). A truncated
 answer is never retried — it is a configuration problem, and the error names
 the key to raise. `ANTHROPIC_API_KEY` is read from `.env` like the Alpaca keys.
 
@@ -386,8 +411,9 @@ pure Python with **no model calls, ever**: the same proposal and the same
 context always produce the same verdict. Every proposal gets exactly one of
 four verdicts — `REJECT`, `FLAG_ONLY`, `NEEDS_APPROVAL` or `AUTO_EXECUTE` —
 and `AUTO_EXECUTE` is unreachable unless every one of the twenty-one rules
-passed. A verdict is all this phase produces: there is no Executor
-implementation yet, so even `AUTO_EXECUTE` places no order until Phase 6.
+passed. The engine itself only records verdicts; placing an order is the
+dispatcher's job, with `broker.enabled` on (see Execution, below), and an
+`AUTO_EXECUTE` equity verdict is placed there without a human approval.
 
 It is also the only package that may ever reference an `Executor`.
 `tests/test_policy_architecture.py` statically scans every module outside
@@ -858,10 +884,11 @@ aegis/
   notify/            Phase 7 notifications: outbox (what is due, sent once), imessage / slack / ntfy
   scorecard/         read-only grading of past proposals: gather (store join), grade (pure)
   dashboard/         stub for Phase 8
-tests/               config, cache, model-parsing, pricing, position, store, brain, policy and execution tests (canned JSON, FakeLLM, fake broker clients, hand-built contexts, tmp_path DBs)
+tests/               config, cache, model-parsing, pricing, position, store, brain, policy, execution, orders CLI, notify and scorecard tests (canned JSON, FakeLLM, fake broker clients, hand-built contexts, tmp_path DBs)
 docs/phase5/         working documents of the policy-engine phase: spec, decisions, review rulings
 docs/phase5_1/       the Phase 5.1 follow-ups: what changed, why, and the evidence
 docs/phase6/         the Phase 6 spec: decisions, flow, and the 6a/6b/6c breakdown
+docs/STATUS.md       canonical current status: components, safety defaults, tests, open issues
 ```
 
 ## Roadmap
@@ -873,9 +900,10 @@ docs/phase6/         the Phase 6 spec: decisions, flow, and the 6a/6b/6c breakdo
 | 3     | Persistence: SQLite journal of proposals, orders, fills |
 | 4     | Brain: Claude proposes structured trades |
 | 5     | Policy engine: deterministic gate enforcing risk_limits |
-| 5.1   | Expiry floor for the brain's chains, and the quote-age rule (this) |
-| 6     | Execution: paper broker behind the Executor interface |
-| 7     | Notifications: iMessage, Slack or ntfy, from the event log |
-| 8     | Dashboard |
-| 9     | Daemon: scheduled autonomous loop |
-| 10    | Paper campaign: supervised live-paper trading run |
+| 5.1   | Expiry floor for the brain's chains, and the quote-age rule |
+| 6     | Execution: paper broker behind the Executor interface (shipped) |
+| 7     | Notifications: iMessage, Slack or ntfy, from the event log (shipped) |
+| after 7 | Proposal scorecard: read-only grading of past proposals (shipped) |
+| 8     | Dashboard (not built; `aegis/dashboard` is a stub) |
+| 9     | Daemon: scheduled autonomous loop (not built) |
+| 10    | Paper campaign: supervised live-paper trading run (not built) |
