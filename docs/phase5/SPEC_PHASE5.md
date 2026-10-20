@@ -1,13 +1,13 @@
 # AEGIS Phase 5 — policy engine: binding spec for all agents
 
-Repo: /Users/test1/aegis   Python: /Users/test1/aegis/.venv/bin/python (3.14)
+Repo: ~/aegis   Python: ~/aegis/.venv/bin/python (3.14)
 Run tests (both must pass at the end of every stage):
-    cd /Users/test1/aegis && .venv/bin/python -m pytest -q
-    cd /Users/test1/aegis && .venv/bin/python -W error -m pytest -q
+    cd ~/aegis && .venv/bin/python -m pytest -q
+    cd ~/aegis && .venv/bin/python -W error -m pytest -q
 Baseline before Phase 5 agent work: 1187 passed, both ways.
 
 ## §0 Ground rules
-- NEVER make a network call. NEVER call the real Alpaca or Anthropic APIs (tests and probes use fakes, monkeypatched fetchers and fixtures). NEVER read or print /Users/test1/aegis/.env. NEVER create or touch /Users/test1/aegis/data/aegis.db (it is the user's real store) — tests use tmp_path; probes use a directory you create with `mktemp -d` (never inside the repo).
+- NEVER make a network call. NEVER call the real Alpaca or Anthropic APIs (tests and probes use fakes, monkeypatched fetchers and fixtures). NEVER read or print ~/aegis/.env. NEVER create or touch ~/aegis/data/aegis.db (it is the user's real store) — tests use tmp_path; probes use a directory you create with `mktemp -d` (never inside the repo).
 - NEVER run a git command that changes state (no commit/add/stash/checkout/reset/push). `git status` / `git diff` are fine.
 - Do NOT modify anything under aegis/brain/ (the user forbade it) or aegis/pricing/ or aegis/execution/. Do not edit README.md (the lead writes it).
 - LOCKED by the lead (do not edit; report contract problems in your final report instead): aegis/policy/models.py, aegis/policy/errors.py, aegis/policy/__init__.py, aegis/config.py, config.yaml, aegis/data/** (incl. the new AccountState.last_equity / options_buying_power fields and the warnings filter in aegis/data/__init__.py), tests/test_market_clock.py, tests/test_config.py, and the `plain_cli_output` fixture in tests/conftest.py. The store's `Controls` model in aegis/store/models.py is the lead's too (the store agent may extend docstrings around it but not change its fields).

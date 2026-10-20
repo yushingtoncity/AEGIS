@@ -19,7 +19,7 @@ where they differ:
 
 Notes for the reader:
 
-- Paths such as `/Users/test1/aegis` are the machine the work was done on.
+- Paths such as `~/aegis` are the checkout on the machine the work was done on.
 - `RULINGS_R1.md` cites findings by id (`1.2`, `3.14`, `NEW-1-R1-R1`); the
   two JSON files hold them. They are the reviewers' raw reports: a repro or
   line number in them describes the tree as it was then, and a "suggested
