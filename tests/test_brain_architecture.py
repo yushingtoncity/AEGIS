@@ -80,6 +80,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -427,7 +428,8 @@ class TestImportChecker:
         assert _resolve("execution", 2, "aegis.brain.prompts") == "aegis.brain.execution"
 
     def test_the_walk_covers_the_whole_package(self):
-        found = {str(path.relative_to(BRAIN_DIR)) for path in _brain_sources()}
+        # as_posix: EXPECTED_MODULES spells nested paths with "/" on every platform
+        found = {path.relative_to(BRAIN_DIR).as_posix() for path in _brain_sources()}
         assert EXPECTED_MODULES <= found, EXPECTED_MODULES - found
         assert EXECUTION_DIR.is_dir()  # the rule has a real target
         assert CLI_BRAIN.exists()
@@ -1023,6 +1025,28 @@ REPORT_OK = {
 # A path that differs only in case names the same file here (APFS, NTFS)?
 _CASE_INSENSITIVE_FS = Path(str(EXECUTION_DIR / "base.py").swapcase()).exists()
 
+_ERROR_PRIVILEGE_NOT_HELD = 1314  # WinError: no SeCreateSymbolicLinkPrivilege
+
+
+def _can_symlink() -> bool:
+    """Whether this account may create a file symlink. Windows withholds the
+    privilege unless Developer Mode is on or the process is elevated; POSIX
+    always grants it. Only that refusal means "cannot": any other failure is
+    raised, so a real problem is never skipped as a missing capability."""
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(tmp) / "target.py"
+        target.write_text("", encoding="utf-8")
+        try:
+            os.symlink(target, Path(tmp) / "link.py")
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == _ERROR_PRIVILEGE_NOT_HELD:
+                return False
+            raise
+    return True
+
+
+_CAN_SYMLINK = _can_symlink()
+
 
 def _run_runtime_harness(tmp_path: Path, extra: str | None = None, *, during: bool = False) -> tuple[int, dict]:
     argv = [sys.executable, "-c", _RUNTIME_SCRIPT, str(EXECUTION_DIR), str(tmp_path)]
@@ -1104,12 +1128,20 @@ class TestRuntime:
                 "exec(compile(open(path).read(), 'x', 'exec'), {})",
                 False,
             ),
-            (
+            pytest.param(
                 "import os\n"
                 "link = os.path.join(TMP, 'innocent.py')\n"
                 "os.symlink(os.path.join(EXECUTION_DIR, 'base.py'), link)\n"
                 "exec(open(link).read(), {})",
                 False,
+                # needs a symlink the account may create. Where it is skipped, the
+                # relative, ``..`` and other-case spellings still exercise the hook's
+                # path canonicalisation; symlink resolution itself is covered on
+                # macOS, Linux, and Windows with Developer Mode on.
+                marks=pytest.mark.skipif(
+                    not _CAN_SYMLINK,
+                    reason="this account may not create symlinks (Windows without Developer Mode or elevation)",
+                ),
             ),
             pytest.param(
                 "import os\nexec(open(os.path.join(EXECUTION_DIR, 'base.py').swapcase()).read(), {})",
