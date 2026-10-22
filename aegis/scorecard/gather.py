@@ -2,8 +2,9 @@
 
 Joins each proposal with its legs, its latest policy verdict, the model the
 thesis stage ran on (``reasoning.model_name``), the proposal stage's
-``model_selection`` choice, and the cycle's ``market_snapshot`` (the spot and
-the contract deltas the brain saw). A cycle whose snapshot event is missing or
+``model_selection`` choice, and the cycle's ``market_snapshot`` (the spot,
+whether it was stale, and the contract deltas, quotes and implied vols the
+brain saw). A cycle whose snapshot event is missing or
 no longer validates is graded without it; nothing here raises on old rows.
 """
 
@@ -11,11 +12,12 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime
+from typing import NamedTuple
 
 from aegis.brain.cycle import MARKET_SNAPSHOT_EVENT, snapshot_from_event
 from aegis.brain.models import MarketSnapshot
 from aegis.data.models import parse_occ_symbol
-from aegis.scorecard.models import ProposalInputs
+from aegis.scorecard.models import LegQuote, ProposalInputs
 from aegis.store.models import Proposal, ProposalLeg, ReasoningStage
 from aegis.store.repo import (
     get_cycle_events,
@@ -68,22 +70,45 @@ def _thesis_model(conn: sqlite3.Connection, cycle_id: str) -> str | None:
     return models[-1] if models else None
 
 
+class _SnapshotFacts(NamedTuple):
+    spot: float | None = None
+    spot_time: datetime | None = None
+    spot_stale: bool = True
+    deltas: dict[str, float] = {}
+    quotes: dict[str, LegQuote] = {}
+    risk_free_rate: float | None = None
+
+
 def _from_snapshot(
     snapshot: MarketSnapshot | None, underlying: str, legs: tuple[ProposalLeg, ...]
-) -> tuple[float | None, dict[str, float]]:
-    """The underlying's spot and each leg's stored delta, as far as the snapshot has them."""
+) -> _SnapshotFacts:
+    """The underlying's spot (and how fresh it was) and each leg's stored delta
+    and quote, as far as the snapshot has them."""
     if snapshot is None:
-        return None, {}
+        return _SnapshotFacts()
     entry = next((s for s in snapshot.symbols if s.symbol == underlying), None)
     if entry is None:
-        return None, {}
+        return _SnapshotFacts(risk_free_rate=snapshot.risk_free_rate)
     deltas: dict[str, float] = {}
+    quotes: dict[str, LegQuote] = {}
     if entry.chain is not None:
         wanted = {leg.symbol for leg in legs}
         for contract in entry.chain.contracts:
-            if contract.symbol in wanted and contract.greeks is not None:
+            if contract.symbol not in wanted:
+                continue
+            if contract.greeks is not None:
                 deltas[contract.symbol] = contract.greeks.delta
-    return entry.spot, deltas
+            quotes[contract.symbol] = LegQuote(
+                bid=contract.bid, ask=contract.ask, implied_vol=contract.implied_vol
+            )
+    return _SnapshotFacts(
+        spot=entry.spot,
+        spot_time=entry.spot_time,
+        spot_stale=entry.stale,
+        deltas=deltas,
+        quotes=quotes,
+        risk_free_rate=snapshot.risk_free_rate,
+    )
 
 
 def gather(
@@ -97,7 +122,7 @@ def gather(
         underlying = underlying_of(proposal, legs)
         if proposal.cycle_id not in snapshots:
             snapshots[proposal.cycle_id] = _snapshot(conn, proposal.cycle_id)
-        spot, deltas = _from_snapshot(snapshots[proposal.cycle_id], underlying, legs)
+        facts = _from_snapshot(snapshots[proposal.cycle_id], underlying, legs)
         verdict = get_latest_verdict(conn, proposal.id)
         inputs.append(
             ProposalInputs(
@@ -115,8 +140,12 @@ def gather(
                 model_source=_proposal_model_source(conn, proposal.cycle_id),
                 verdict=verdict.verdict.value if verdict is not None else None,
                 legs=legs,
-                leg_deltas=deltas,
-                snapshot_spot=spot,
+                leg_deltas=facts.deltas,
+                snapshot_spot=facts.spot,
+                spot_time=facts.spot_time,
+                spot_stale=facts.spot_stale,
+                leg_quotes=facts.quotes,
+                risk_free_rate=facts.risk_free_rate,
             )
         )
     return inputs

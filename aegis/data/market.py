@@ -22,7 +22,7 @@ from datetime import date, timedelta
 from typing import Any, Sequence
 
 from alpaca.common.exceptions import APIError
-from alpaca.data.enums import DataFeed
+from alpaca.data.enums import Adjustment, DataFeed
 from alpaca.data.requests import (
     OptionBarsRequest,
     OptionChainRequest,
@@ -109,13 +109,26 @@ def get_spot(symbol: str) -> Quote:
     return default_cache.get_or_fetch(("spot", symbol), ttl, fetch)
 
 
+_ADJUSTMENTS = tuple(item.value for item in Adjustment)
+
+
 def get_bars(
     symbol: str,
     timeframe: str | None = None,
     lookback_days: int | None = None,
+    adjustment: str | None = None,
 ) -> list[Bar]:
-    """Historical bars, newest last. Defaults come from config.yaml's bars block."""
+    """Historical bars, newest last. Defaults come from config.yaml's bars block.
+
+    ``adjustment`` is Alpaca's corporate-action basis: ``raw``, ``split``,
+    ``dividend`` or ``all`` (split and dividend). None sends no adjustment,
+    which is the API's default (raw) and what the brain has always seen.
+    """
     symbol = symbol.upper()
+    if adjustment is not None and adjustment not in _ADJUSTMENTS:
+        raise ValueError(
+            f"unknown bar adjustment {adjustment!r}: expected one of {', '.join(_ADJUSTMENTS)}"
+        )
     config = get_config()
     tf_spec = timeframe or config.bars.timeframe
     days = lookback_days or config.bars.lookback_days
@@ -124,6 +137,7 @@ def get_bars(
     def fetch() -> list[Bar]:
         tf = _timeframe(tf_spec)
         start = utcnow() - timedelta(days=days)
+        extra: dict[str, Any] = {} if adjustment is None else {"adjustment": Adjustment(adjustment)}
 
         def request(feed: DataFeed | None) -> Any:
             return stock_client().get_stock_bars(
@@ -131,6 +145,7 @@ def get_bars(
                     symbol_or_symbols=symbol,
                     timeframe=tf,
                     start=start,
+                    **extra,
                     **({} if feed is None else {"feed": feed}),
                 )
             )
@@ -150,7 +165,7 @@ def get_bars(
             for bar in bar_set.data.get(symbol, [])
         ]
 
-    return default_cache.get_or_fetch(("bars", symbol, tf_spec, days), ttl, fetch)
+    return default_cache.get_or_fetch(("bars", symbol, tf_spec, days, adjustment), ttl, fetch)
 
 
 def _fetch_contracts(underlying: str, expiration: date | None) -> list[dict[str, Any]]:

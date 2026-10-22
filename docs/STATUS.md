@@ -28,7 +28,7 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 | Policy engine (21 rules), `aegis/policy` | active (`aegis/policy/rules.py`, `RULES`) | [Code] |
 | Execution | shipped, off by default (`broker.enabled: false`). `PaperExecutor` in `aegis/execution/paper.py` is the only production Executor; its one caller is `aegis/policy/dispatch.py`; manual orders via `aegis/cli/orders.py` | [Code] |
 | Notifications, `aegis/notify` (iMessage, Slack, ntfy) | shipped, off by default (`notify.enabled: false`) | [Code] |
-| Proposal scorecard, `aegis/scorecard` and `aegis/cli/scorecard.py` | shipped, read-only | [Code] |
+| Proposal scorecard, `aegis/scorecard` and `aegis/cli/scorecard.py` | shipped, read-only. Since PR #22: adjusted closes, fresh entries only, 95% intervals, always-long and shuffled-direction baselines, Brier reference, estimated option P&L after theta and the spread | [Code] |
 | Dashboard, `aegis/dashboard` | stub; Phase 8 not approved | [Code] |
 | Scheduler, `ops/launchd` | two launchd jobs on the Mac: a brain cycle at 10:00, 11:30, 13:30 and 15:00 New York time on weekdays (brain once, policy evaluate, orders tick, notify send), and an orders tick every 5 minutes in market hours. The market clock gates every step and anything but "open" runs nothing. Only existing CLI commands run; the policy engine still judges every proposal. | [Code] |
 | Scheduler daemon (Phase 9) | not built; the launchd jobs stand in for it | [Code] |
@@ -71,7 +71,9 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 | Mac | `python -m pytest -q` in an isolated temporary checkout | `d7149a1` | 5,420 | 0 | 0 | [Test] (source: owner report) |
 | Mac | `python -m pytest -q` | `60950a9` | 5,420 | 0 | 0 | [Test] (source: Claude Code session on the Mac, 2026-10-22) |
 | Linux (cloud) | `python -m pytest -q` | `5cc2175` (PR #20 head) | 5,443 | 1 | 0 | [Test] (source: Claude Code cloud session, 2026-10-22) |
+| Linux (cloud), Python 3.14 | `python -m pytest -q` | `381c96b` (PR #22 head) | 5,480 | 1 | 0 | [Test] (source: Claude Code cloud session, 2026-10-22) |
 
+- The cloud skip is `tests/test_brain_architecture.py:1110` ("case-sensitive filesystem"), expected on Linux. [Test]
 - Main `1cadcc3` has the same tree as `d7149a1`, so these results apply to main unchanged. [Code]
 - The Windows skip is intentional: `tests/test_brain_architecture.py::TestRuntime::test_the_harness_catches_a_load_by_any_name[symlink]` skips when the account can't create symlinks (Windows without Developer Mode or elevation). [Code]
 - Before PR #15, Windows had 3 portability failures; PR #15 fixed them in `tests/test_brain_architecture.py` and `tests/test_pricing.py`. Resolved. [Code] [Test]
@@ -95,6 +97,8 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 
 Merged pull requests, newest first (`git log --merges main`). Git history is the full record.
 
+- #22 feat: honest scorecard grades (adjusted prices, fresh entries, baselines, option P&L)
+- #21 docs: record the launchd scheduler in STATUS.md; fix aegisctl status exit code
 - #20 feat: run brain cycles and order ticks on a launchd schedule
 - #19 docs: refresh stale README sections; resolve STATUS open issue 1
 - #16 docs: add canonical STATUS.md
