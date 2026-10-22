@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>local.aegis.tick</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__AEGIS_HOME__/ops/launchd/aegis-run.sh</string>
+    <string>tick</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__AEGIS_HOME__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/launchd.out</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/launchd.err</string>
+  <!-- Every 5 minutes: a "yes" is placed well inside its 15-minute
+       approval, and fills are texted soon after. Outside 09:25-16:30 ET on
+       weekdays the script exits at once. -->
+  <key>StartInterval</key>
+  <integer>300</integer>
+</dict>
+</plist>
