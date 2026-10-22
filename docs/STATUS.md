@@ -2,6 +2,7 @@
 
 Code facts verified at main `1cadcc3` (merge of PR #15) on 2026-10-20.
 If main has moved past `1cadcc3` with changes outside docs/, re-check before relying on this file.
+Scheduler, environment, test and recent-change entries updated at main `5260f3b` (merge of PR #20) on 2026-10-22.
 
 ## How to use this file
 
@@ -29,7 +30,8 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 | Notifications, `aegis/notify` (iMessage, Slack, ntfy) | shipped, off by default (`notify.enabled: false`) | [Code] |
 | Proposal scorecard, `aegis/scorecard` and `aegis/cli/scorecard.py` | shipped, read-only | [Code] |
 | Dashboard, `aegis/dashboard` | stub; Phase 8 not approved | [Code] |
-| Scheduler daemon (Phase 9) | not built | [Code] |
+| Scheduler, `ops/launchd` | two launchd jobs on the Mac: a brain cycle at 10:00, 11:30, 13:30 and 15:00 New York time on weekdays (brain once, policy evaluate, orders tick, notify send), and an orders tick every 5 minutes in market hours. The market clock gates every step and anything but "open" runs nothing. Only existing CLI commands run; the policy engine still judges every proposal. | [Code] |
+| Scheduler daemon (Phase 9) | not built; the launchd jobs stand in for it | [Code] |
 
 ## Safety defaults [Code]
 
@@ -38,6 +40,7 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 - Tests pin both shipped defaults: `tests/test_config.py::test_shipped_broker_block_matches_the_code_defaults` and `tests/test_notify.py::TestConfig::test_shipped_block_is_the_code_defaults_and_off`.
 - `.env` is gitignored; `.env.example` lists key names with empty values.
 - Turning broker or notifications on is the owner's action only (CLAUDE.md invariant 8).
+- On the Mac runtime the owner turned both on on 2026-10-22, as an uncommitted local edit to `config.yaml`; the shipped defaults stay off. With the launchd jobs loaded, the Mac now places AUTO_EXECUTE paper equity orders and sends notifications on its own. Options and other NEEDS_APPROVAL verdicts still wait for an approval. [Reported]
 
 ## Approved decisions
 
@@ -53,9 +56,9 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 
 | Role | Purpose | Last known commit | Label |
 | --- | --- | --- | --- |
-| GitHub main | source of truth | `1cadcc3` | [Code] |
+| GitHub main | source of truth | `5260f3b` | [Code] |
 | Windows dev | development | main at `1cadcc3` when this file was written | [Reported] |
-| Mac runtime | paper operations | `fff521a`, one PR behind main | [Reported] |
+| Mac runtime | paper operations | `5260f3b`, launchd jobs loaded 2026-10-22 | [Reported] |
 
 - PR #15 changed only `CLAUDE.md` and two test files (`git diff --stat fff521a 1cadcc3`). [Code] So if the Mac is at `fff521a`, as reported, its runtime code is identical to main.
 - Backups and credential-file permissions were set up on 2026-10-20; details are kept private. [Reported]
@@ -66,6 +69,8 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 | --- | --- | --- | --- | --- | --- | --- |
 | Windows dev | `python -m pytest -q` | `d7149a1` (PR #15 head) | 5,419 | 1 | 0 | [Test] (source: owner report) |
 | Mac | `python -m pytest -q` in an isolated temporary checkout | `d7149a1` | 5,420 | 0 | 0 | [Test] (source: owner report) |
+| Mac | `python -m pytest -q` | `60950a9` | 5,420 | 0 | 0 | [Test] (source: Claude Code session on the Mac, 2026-10-22) |
+| Linux (cloud) | `python -m pytest -q` | `5cc2175` (PR #20 head) | 5,443 | 1 | 0 | [Test] (source: Claude Code cloud session, 2026-10-22) |
 
 - Main `1cadcc3` has the same tree as `d7149a1`, so these results apply to main unchanged. [Code]
 - The Windows skip is intentional: `tests/test_brain_architecture.py::TestRuntime::test_the_harness_catches_a_load_by_any_name[symlink]` skips when the account can't create symlinks (Windows without Developer Mode or elevation). [Code]
@@ -75,14 +80,14 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 ## Open issues
 
 1. README.md refresh: resolved. The intro, Policy engine note, Store and Agent brain sections, Setup note on `ANTHROPIC_API_KEY`, Roadmap and repo layout now match the code; Execution, Notifications and Proposal scorecard were already current. "Until Phase 4" wording remains in `aegis/cli/check.py` and `.env.example` (code and config, out of scope for a docs PR). [Code]
-2. Mac runtime checks pending: update the Mac to main, first scorecard run, notification test, brain model-selection check. [Reported]
+2. Mac runtime checks: resolved 2026-10-22. The Mac was updated to main, the first scorecard run graded one proposal, the iMessage test reached the owner, and `brain once` logged the newest model for every stage with fresh stock quotes. [Reported]
 3. Merged feature branches remain on the remote, every one an ancestor of main (`git ls-remote --heads origin`, `git merge-base --is-ancestor`): `claude/auto-latest-models-z7rxu6`, `claude/offline-aegis-work-5sytso`, `claude/option-close-tier-detail-8pa3e5`, `claude/project-thread-tycmn6`, `claude/proposal-scorecard-pzq07u`, `claude/vigilant-johnson-h8jcnq`, `claude/windows-test-portability-agent-rules`, `phase-5-policy-engine`. Deleting them needs owner approval. [Code]
 4. `notify.enabled` is validated as a plain `bool` while `broker.enabled` uses `StrictBool` (`aegis/config.py`). Aligning them is an owner decision. [Code]
 
 ## Next priorities (set by owner)
 
 1. README refresh: done (PR #19). [Reported]
-2. Mac runtime checks (above). [Reported]
+2. Mac runtime checks: done 2026-10-22. [Reported]
 3. Delete merged remote branches (owner approval). [Reported]
 4. Choose the next track: the Phase 8 read-only dashboard or the research roadmap built on scorecard evidence. [Reported]
 
@@ -90,6 +95,10 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 
 Merged pull requests, newest first (`git log --merges main`). Git history is the full record.
 
+- #20 feat: run brain cycles and order ticks on a launchd schedule
+- #19 docs: refresh stale README sections; resolve STATUS open issue 1
+- #16 docs: add canonical STATUS.md
+- #17 docs: replace a local home path in phase 5 records
 - #15 test: Windows portability for three offline tests; agent safety rules in CLAUDE.md
 - #14 feat: read-only proposal scorecard
 - #13 fix: describe an option closing sale accurately in auto_tier

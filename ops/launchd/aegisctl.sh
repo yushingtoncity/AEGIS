@@ -65,7 +65,9 @@ case "${1:-}" in
   status)
     launchctl list | grep -E 'local\.aegis\.' || echo "no AEGIS job is loaded"
     for log in cycle tick; do
-      [ -f "$LOG_DIR/$log.log" ] && { echo "--- $log.log"; tail -n 5 "$LOG_DIR/$log.log"; }
+      [ -f "$LOG_DIR/$log.log" ] || continue
+      echo "--- $log.log"
+      tail -n 5 "$LOG_DIR/$log.log"
     done
     ;;
   *) echo "usage: aegisctl.sh {install|pause|resume|remove|status}" >&2; exit 64 ;;
