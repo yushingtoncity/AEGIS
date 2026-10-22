@@ -76,7 +76,7 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 | Mac | `python -m pytest -q` | `60950a9` | 5,420 | 0 | 0 | [Test] (source: Claude Code session on the Mac, 2026-10-22) |
 | Linux (cloud) | `python -m pytest -q` | `5cc2175` (PR #20 head) | 5,443 | 1 | 0 | [Test] (source: Claude Code cloud session, 2026-10-22) |
 | Linux (cloud), Python 3.14 | `python -m pytest -q` | `381c96b` (PR #22 head) | 5,480 | 1 | 0 | [Test] (source: Claude Code cloud session, 2026-10-22) |
-| Linux (cloud), Python 3.14 | `python -m pytest -q` | forecast PR head (see the PR) | 5,695 | 1 | 0 | [Test] (source: Claude Code cloud session, 2026-10-22) |
+| Linux (cloud), Python 3.14 | `python -m pytest -q` | `323ab4a` (forecast PR) | 5,695 | 1 | 0 | [Test] (source: Claude Code cloud session, 2026-10-22) |
 
 - The cloud skip is `tests/test_brain_architecture.py:1110` ("case-sensitive filesystem"), expected on Linux. [Test]
 - Main `1cadcc3` has the same tree as `d7149a1`, so these results apply to main unchanged. [Code]
