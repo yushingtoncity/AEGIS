@@ -6,14 +6,18 @@ Run:  python -m aegis.cli.scorecard [--since YYYY-MM-DD] [--until YYYY-MM-DD]
 
 For every stored proposal it works out the call (bullish, bearish, or
 neutral for a delta-flat option structure), takes the entry price from the
-cycle's stored snapshot, and checks the underlying's close a few trading
-sessions later (``scorecard.horizons_days`` in config.yaml). The summary
-shows, per group and horizon, how many calls were graded, the hit rate, the
-average signed return (positive means the calls were right on average), the
-average confidence and the Brier score (lower is better; 0.25 is what always
-saying 50% earns). Grouping by ``proposal`` (the default) compares the model
-the proposal stage ran on, ``thesis`` the thesis stage's model, ``pair``
-both. See ``aegis.scorecard.grade`` for exactly how a call is graded.
+cycle's stored snapshot when that spot was fresh (else the next session's
+open, or no grade at all; see ``aegis.scorecard.grade``), and checks the
+underlying's split- and dividend-adjusted close a few trading sessions later
+(``scorecard.horizons_days`` in config.yaml). The summary shows, per group
+and horizon, how many calls were graded, the hit rate and the average signed
+return (positive means the calls were right on average) with 95% intervals,
+the average confidence and the Brier score next to its base-rate reference.
+A second table sets the same calls beside two no-skill baselines (always
+long the same names, and the same calls with directions shuffled) and, for
+options, the share with a positive estimated P&L after theta and the spread.
+Grouping by ``proposal`` (the default) compares the model the proposal stage
+ran on, ``thesis`` the thesis stage's model, ``pair`` both.
 
 Later closes come from Alpaca daily bars (the free IEX feed when the account
 has no paid data), so this needs the Alpaca keys in .env. The database is
@@ -43,7 +47,16 @@ from aegis.store.db import MEMORY_DB, connect, resolve_db_path, status
 from aegis.store.errors import StoreError
 
 INDENT = "  "
-BAR_FETCH_PADDING_DAYS = 7  # calendar days of slack before the first proposal, for its prior close
+BAR_FETCH_PADDING_DAYS = 7  # calendar days of slack before the first proposal, so its session's bars are in
+
+LEGEND = (
+    "",
+    "hit rate and avg signed: the calls' record, with 95% intervals (Wilson; Student t).",
+    "ref: the Brier score of always forecasting the group's own hit rate; beat it, not 0.25.",
+    "long hit / long avg: what always buying the same names on the same dates got (drift).",
+    "shuffle p: chance the same calls with directions shuffled do as well (1.0 = all one way).",
+    "option P&L wins: structures with a positive estimated P&L after theta and the spread.",
+)
 
 GROUP_LABELS = {
     "proposal": "proposal-stage model",
@@ -52,7 +65,11 @@ GROUP_LABELS = {
     "symbol": "underlying",
 }
 
-BarFetcher = Callable[[str, int], list[Bar]]
+BarFetcher = Callable[[str, int, str], list[Bar]]
+"""(symbol, lookback_days, adjustment) -> daily bars, newest last."""
+
+ADJUSTED = "all"  # split- and dividend-adjusted: what calls are graded on
+RAW = "raw"  # as traded: to bring the snapshot spot onto the adjusted basis, and to price options
 
 
 def _db_path(arg: str | None) -> Path:
@@ -83,21 +100,21 @@ def open_read_only(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-def _alpaca_daily_bars(symbol: str, lookback_days: int) -> list[Bar]:
-    return get_bars(symbol, "1Day", lookback_days=lookback_days)
+def _alpaca_daily_bars(symbol: str, lookback_days: int, adjustment: str) -> list[Bar]:
+    return get_bars(symbol, "1Day", lookback_days=lookback_days, adjustment=adjustment)
 
 
 def fetch_bars(
-    symbols: Iterable[str], lookback_days: int, fetcher: BarFetcher
+    symbols: Iterable[str], lookback_days: int, fetcher: BarFetcher, adjustment: str = ADJUSTED
 ) -> tuple[dict[str, list[Bar]], list[str]]:
     """Daily bars per symbol; a symbol whose fetch fails is reported, not fatal."""
     bars: dict[str, list[Bar]] = {}
     errors: list[str] = []
     for symbol in sorted(set(symbols)):
         try:
-            bars[symbol] = fetcher(symbol, lookback_days)
+            bars[symbol] = fetcher(symbol, lookback_days, adjustment)
         except DataError as exc:
-            errors.append(f"{symbol}: {exc}")
+            errors.append(f"{symbol} ({adjustment}): {exc}")
     return bars, errors
 
 
@@ -113,13 +130,25 @@ def _num(value: float | None, spec: str) -> str:
     return format(value, spec) if value is not None else "-"
 
 
+def _range(low: float | None, high: float | None, fmt: Callable[[float | None], str]) -> str:
+    return f"[{fmt(low)}, {fmt(high)}]" if low is not None and high is not None else ""
+
+
+def _option_cell(result: HorizonResult) -> str:
+    if result.option_pnl is None:
+        return ""
+    on_debit = f", {_pct(result.option_return)} on debit" if result.option_return is not None else ""
+    return f" (option est {result.option_pnl:+,.0f} USD{on_debit})"
+
+
 def _horizon_cell(result: HorizonResult) -> str:
     if result.pending:
         return f"{result.days}d pending"
     if result.hit is None:
         moved = f" moved {_pct(result.underlying_return)}" if result.underlying_return is not None else ""
-        return f"{result.days}d ungraded{moved}"
-    return f"{result.days}d {_pct(result.directional_return)} {'hit' if result.hit else 'miss'}"
+        return f"{result.days}d ungraded{moved}{_option_cell(result)}"
+    verdict = "hit" if result.hit else "miss"
+    return f"{result.days}d {_pct(result.directional_return)} {verdict}{_option_cell(result)}"
 
 
 def _print_proposal(proposal: ScoredProposal) -> None:
@@ -154,7 +183,8 @@ def _print_scorecard(card: Scorecard, detail: bool, errors: Sequence[str]) -> No
     print(
         "horizons: "
         + ", ".join(str(days) for days in card.horizons_days)
-        + " trading session(s) after the proposal; options are graded on the underlying"
+        + " trading session(s) after the proposal, on split- and dividend-adjusted closes;"
+        " option calls are graded on the underlying, with an estimated option P&L beside it"
     )
     for error in errors:
         print(f"price fetch failed for {error}")
@@ -165,15 +195,45 @@ def _print_scorecard(card: Scorecard, detail: bool, errors: Sequence[str]) -> No
     width = max(len("group"), *(len(summary.group) for summary in card.summaries))
     print()
     print(
-        f"{'group':<{width}}  {'days':>4}  {'graded':>8}  {'hit rate':>8}"
-        f"  {'avg signed':>10}  {'avg conf':>8}  {'brier':>6}"
+        f"{'group':<{width}}  {'days':>4}  {'graded':>8}  {'hit rate (95% CI)':>17}"
+        f"  {'avg signed (95% CI)':>25}  {'avg conf':>8}  {'brier':>6}  {'ref':>6}"
     )
     for summary in card.summaries:
         graded = f"{summary.graded}/{summary.proposals}"
+        hit = f"{_rate(summary.hit_rate)} {_range(summary.hit_rate_low, summary.hit_rate_high, _rate)}".strip()
+        signed = (
+            f"{_pct(summary.avg_directional_return)}"
+            f" {_range(summary.avg_return_low, summary.avg_return_high, _pct)}"
+        ).strip()
         print(
-            f"{summary.group:<{width}}  {summary.horizon_days:>4}  {graded:>8}"
-            f"  {_rate(summary.hit_rate):>8}  {_pct(summary.avg_directional_return):>10}"
-            f"  {_num(summary.avg_confidence, '.2f'):>8}  {_num(summary.brier, '.3f'):>6}"
+            f"{summary.group:<{width}}  {summary.horizon_days:>4}  {graded:>8}  {hit:>17}"
+            f"  {signed:>25}  {_num(summary.avg_confidence, '.2f'):>8}"
+            f"  {_num(summary.brier, '.3f'):>6}  {_num(summary.brier_reference, '.3f'):>6}"
+        )
+    print()
+    print("baselines on the same graded calls:")
+    print(
+        f"{'group':<{width}}  {'days':>4}  {'long hit':>8}  {'long avg':>9}"
+        f"  {'shuffle p':>9}  {'option P&L wins':>15}"
+    )
+    for summary in card.summaries:
+        options = (
+            f"{summary.option_hits}/{summary.option_graded} {_rate(summary.option_hit_rate)}"
+            if summary.option_graded
+            else "-"
+        )
+        print(
+            f"{summary.group:<{width}}  {summary.horizon_days:>4}  {_rate(summary.long_hit_rate):>8}"
+            f"  {_pct(summary.long_avg_return):>9}  {_num(summary.shuffle_p, '.3f'):>9}"
+            f"  {options:>15}"
+        )
+    for line in LEGEND:
+        print(line)
+    no_entry = sum(1 for proposal in card.proposals if proposal.entry_price is None)
+    if no_entry:
+        print(
+            f"{no_entry} proposal(s) have no clean entry price (stale spot during a session,"
+            " or no prices) and are not graded; --detail says why"
         )
     if detail:
         print()
@@ -206,10 +266,14 @@ def run(
         conn.close()
     errors: list[str] = []
     bars: dict[str, list[Bar]] = {}
+    raw: dict[str, list[Bar]] = {}
     first = first_session_day(inputs)
     if first is not None:
         lookback = (now.astimezone(NEW_YORK).date() - first).days + BAR_FETCH_PADDING_DAYS
-        bars, errors = fetch_bars((item.underlying for item in inputs), lookback, fetcher)
+        symbols = sorted({item.underlying for item in inputs})
+        bars, errors = fetch_bars(symbols, lookback, fetcher, ADJUSTED)
+        raw, raw_errors = fetch_bars([s for s in symbols if s in bars], lookback, fetcher, RAW)
+        errors += raw_errors
     card = build_scorecard(
         inputs,
         bars,
@@ -219,6 +283,7 @@ def run(
         group_by=group_by,
         since=since,
         until=until,
+        raw_bars_by_symbol=raw,
     )
     return card, errors
 

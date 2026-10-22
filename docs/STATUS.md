@@ -27,7 +27,7 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 | Policy engine (21 rules), `aegis/policy` | active (`aegis/policy/rules.py`, `RULES`) | [Code] |
 | Execution | shipped, off by default (`broker.enabled: false`). `PaperExecutor` in `aegis/execution/paper.py` is the only production Executor; its one caller is `aegis/policy/dispatch.py`; manual orders via `aegis/cli/orders.py` | [Code] |
 | Notifications, `aegis/notify` (iMessage, Slack, ntfy) | shipped, off by default (`notify.enabled: false`) | [Code] |
-| Proposal scorecard, `aegis/scorecard` and `aegis/cli/scorecard.py` | shipped, read-only | [Code] |
+| Proposal scorecard, `aegis/scorecard` and `aegis/cli/scorecard.py` | shipped, read-only. Grading fixes in review on branch `claude/project-thread-7ebivl`: adjusted closes, fresh entries only, 95% intervals, always-long and shuffled-direction baselines, Brier reference, estimated option P&L after theta and the spread | [Code] |
 | Dashboard, `aegis/dashboard` | stub; Phase 8 not approved | [Code] |
 | Scheduler daemon (Phase 9) | not built | [Code] |
 
@@ -66,7 +66,10 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 | --- | --- | --- | --- | --- | --- | --- |
 | Windows dev | `python -m pytest -q` | `d7149a1` (PR #15 head) | 5,419 | 1 | 0 | [Test] (source: owner report) |
 | Mac | `python -m pytest -q` in an isolated temporary checkout | `d7149a1` | 5,420 | 0 | 0 | [Test] (source: owner report) |
+| Cloud (Linux, Python 3.14) | `python -m pytest -q` | main `5260f3b` | 5,443 | 1 | 0 | [Test] |
+| Cloud (Linux, Python 3.14) | `python -m pytest -q` | branch `claude/project-thread-7ebivl` (scorecard grading fixes) | 5,480 | 1 | 0 | [Test] |
 
+- The cloud skip is `tests/test_brain_architecture.py:1110` ("case-sensitive filesystem"), expected on Linux. [Test]
 - Main `1cadcc3` has the same tree as `d7149a1`, so these results apply to main unchanged. [Code]
 - The Windows skip is intentional: `tests/test_brain_architecture.py::TestRuntime::test_the_harness_catches_a_load_by_any_name[symlink]` skips when the account can't create symlinks (Windows without Developer Mode or elevation). [Code]
 - Before PR #15, Windows had 3 portability failures; PR #15 fixed them in `tests/test_brain_architecture.py` and `tests/test_pricing.py`. Resolved. [Code] [Test]

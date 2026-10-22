@@ -860,13 +860,25 @@ python -m aegis.cli.scorecard --json                # for scripts
 Each proposal gets a call: an equity buy is bullish, a sell bearish, and an
 option structure takes the sign of its net delta from the Greeks its cycle's
 snapshot stored (under `scorecard.neutral_delta` it is neutral and not
-graded). The entry is the spot the brain saw in that snapshot, and the
-underlying's close `scorecard.horizons_days` sessions later decides hit or
-miss; sessions that have not closed yet show as pending. Options are graded
-on the underlying, not their own price (the free plan has no option price
-history). The summary shows hit rate, average signed return, average
-confidence and the Brier score (lower is better; 0.25 is a coin flip). Later
-closes come from Alpaca daily bars, so it runs where the keys are.
+graded on direction). Prices are split- and dividend-adjusted daily closes.
+The entry is the spot the brain saw in that snapshot when the snapshot
+marked it fresh; a stale spot is never used, because news the brain read may
+postdate it, so a proposal made while the market was shut enters at the next
+open and one made during a session with a stale spot is left ungraded and
+counted. The underlying's close `scorecard.horizons_days` sessions later
+decides hit or miss; sessions that have not closed yet show as pending.
+
+The summary shows hit rate and average signed return with 95% intervals,
+average confidence, and the Brier score next to its base-rate reference
+(what always forecasting the group's own hit rate scores). A second table
+sets the same calls beside two no-skill baselines: always long the same
+names on the same dates, and a shuffle test (the chance that the same calls
+with their directions shuffled do as well). Option calls are graded on the
+underlying for direction, and beside that each structure gets an estimated
+P&L: legs marked by Black-Scholes at the stored implied vol, with the
+bid-ask spread paid in and out, so time decay and the spread count but an
+IV change does not. Later closes come from Alpaca daily bars, so it runs
+where the keys are.
 
 ## Repo layout
 
@@ -882,7 +894,7 @@ aegis/
   execution/         the broker boundary: base (the Executor interface), models, paper (PaperExecutor)
   cli/               operator tools: check, snapshot, db, trace, brain, policy, orders, notify, scorecard
   notify/            Phase 7 notifications: outbox (what is due, sent once), imessage / slack / ntfy
-  scorecard/         read-only grading of past proposals: gather (store join), grade (pure)
+  scorecard/         read-only grading of past proposals: gather (store join), grade, stats, options (pure)
   dashboard/         stub for Phase 8
 tests/               config, cache, model-parsing, pricing, position, store, brain, policy, execution, orders CLI, notify and scorecard tests (canned JSON, FakeLLM, fake broker clients, hand-built contexts, tmp_path DBs)
 docs/phase5/         working documents of the policy-engine phase: spec, decisions, review rulings

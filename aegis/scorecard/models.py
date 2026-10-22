@@ -10,11 +10,22 @@ from pydantic import BaseModel, ConfigDict
 from aegis.store.models import Instrument, OrderSide, ProposalLeg
 
 Direction = Literal["bullish", "bearish", "neutral", "unknown"]
-EntrySource = Literal["snapshot", "prior_close"]
+EntrySource = Literal["snapshot", "next_open"]
+"""``snapshot``: the fresh spot the brain saw, moved onto the adjusted basis.
+``next_open``: the open of the first session after a proposal made while the
+market was shut (its snapshot spot is the last trade, older than the news)."""
 
 
 class _Frozen(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class LegQuote(_Frozen):
+    """What the snapshot's chain said about one leg's contract."""
+
+    bid: float | None = None
+    ask: float | None = None
+    implied_vol: float | None = None
 
 
 class ProposalInputs(_Frozen):
@@ -44,6 +55,15 @@ class ProposalInputs(_Frozen):
     legs: tuple[ProposalLeg, ...] = ()
     leg_deltas: dict[str, float] = {}
     snapshot_spot: float | None = None
+    spot_time: datetime | None = None
+    """When the snapshot spot traded; None when the snapshot had no timestamp."""
+    spot_stale: bool = True
+    """The snapshot's own staleness flag for the spot (market shut, no venue
+    timestamp, or older than ``stale_after_seconds``). A stale spot is never
+    the entry: news the brain read may postdate it."""
+    leg_quotes: dict[str, LegQuote] = {}
+    """Each leg's quote and implied vol from the same snapshot, by contract symbol."""
+    risk_free_rate: float | None = None
 
 
 class HorizonResult(_Frozen):
@@ -58,6 +78,16 @@ class HorizonResult(_Frozen):
     """underlying_return signed by the call: positive means the call was right."""
     hit: bool | None = None
     pending: bool = False
+    option_pnl: float | None = None
+    """Options only: estimated dollar P&L of the whole structure if it had
+    been bought at the snapshot's quotes and sold at this close. Each leg is
+    marked by Black-Scholes at the stored implied vol (so theta and the
+    underlying move count, an IV change does not), and the bid-ask spread is
+    paid on the way in and again on the way out. An estimate, not a fill."""
+    option_return: float | None = None
+    """option_pnl over the net debit paid; None for a credit structure."""
+    option_hit: bool | None = None
+    """option_pnl > 0."""
 
 
 class ScoredProposal(_Frozen):
@@ -93,7 +123,34 @@ class GroupSummary(_Frozen):
     avg_directional_return: float | None = None
     avg_confidence: float | None = None
     brier: float | None = None
-    """Mean of (confidence - hit)^2 over graded calls: 0 is perfect, 0.25 is a coin flip at 50%."""
+    """Mean of (confidence - hit)^2 over graded calls: 0 is perfect."""
+    brier_reference: float | None = None
+    """What always forecasting this group's own hit rate would score,
+    hit_rate * (1 - hit_rate). A Brier above it is worse than knowing nothing
+    but the base rate; 0.25 is only the reference when the hit rate is 50%."""
+    no_entry: int = 0
+    """Proposals left ungraded because no clean entry price existed (a stale
+    spot during the session, or no price at all)."""
+    hit_rate_low: float | None = None
+    hit_rate_high: float | None = None
+    """95% Wilson interval for the hit rate."""
+    avg_return_low: float | None = None
+    avg_return_high: float | None = None
+    """95% Student-t interval for the average signed return (needs 2 graded)."""
+    long_hit_rate: float | None = None
+    """Always-long baseline: the share of the same graded calls where the
+    underlying simply rose. Beating it is the first test of skill over drift."""
+    long_avg_return: float | None = None
+    """Always-long baseline: the underlying's average return over the same calls."""
+    shuffle_p: float | None = None
+    """Direction-shuffled null: the chance that the same calls with their
+    bullish/bearish labels shuffled earn an average signed return at least
+    as high. 1.0 when every call points the same way (no direction to test)."""
+    option_graded: int = 0
+    option_hits: int = 0
+    option_hit_rate: float | None = None
+    """Share of option structures with a positive estimated P&L (see
+    ``HorizonResult.option_pnl``); neutral structures count here too."""
 
 
 class Scorecard(_Frozen):
