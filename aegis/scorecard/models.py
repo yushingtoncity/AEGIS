@@ -47,6 +47,9 @@ class ProposalInputs(_Frozen):
     quantity: float
     confidence: float
     proposal_model: str
+    prompt_version: str | None = None
+    """The proposal stage's prompt version: it says whether ``confidence``
+    has its defined meaning (``aegis.brain.models.confidence_is_defined``)."""
     thesis_model: str | None = None
     model_source: str | None = None
     """``latest``, ``pinned`` or ``fallback`` from the cycle's ``model_selection``
@@ -99,6 +102,7 @@ class ScoredProposal(_Frozen):
     side: OrderSide
     confidence: float
     proposal_model: str
+    prompt_version: str | None = None
     thesis_model: str | None = None
     model_source: str | None = None
     verdict: str | None = None
@@ -121,11 +125,15 @@ class GroupSummary(_Frozen):
     hits: int
     hit_rate: float | None = None
     avg_directional_return: float | None = None
+    confidence_graded: int = 0
+    """Graded calls whose confidence is scored: only at the
+    ``CONFIDENCE_HORIZON_SESSIONS`` horizon, and only for proposals made
+    under the defined meaning (``confidence_is_defined``). Zero elsewhere."""
     avg_confidence: float | None = None
     brier: float | None = None
-    """Mean of (confidence - hit)^2 over graded calls: 0 is perfect."""
+    """Mean of (confidence - hit)^2 over the ``confidence_graded`` calls: 0 is perfect."""
     brier_reference: float | None = None
-    """What always forecasting this group's own hit rate would score,
+    """What always forecasting those calls' own hit rate would score,
     hit_rate * (1 - hit_rate). A Brier above it is worse than knowing nothing
     but the base rate; 0.25 is only the reference when the hit rate is 50%."""
     no_entry: int = 0

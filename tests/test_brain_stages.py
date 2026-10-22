@@ -616,7 +616,7 @@ class TestThesis:
                 invalidation="A close below 630.",
                 raw_model_output="{}",
                 model_name="m",
-                prompt_version="proposal-v1+system-v1",
+                prompt_version="proposal-v2+system-v1",
             )
         ]
         llm = FakeLLM.from_fixtures({"thesis": ["thesis_ok.json"]})

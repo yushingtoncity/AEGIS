@@ -28,7 +28,7 @@ from typing import Literal
 from aegis.brain.llm import ListedModel, LLMClient
 from aegis.brain.models import Frozen
 from aegis.config import BrainConfig
-from aegis.store.models import ReasoningStage
+from aegis.store.models import PIPELINE_STAGES
 
 ChoiceSource = Literal["pinned", "latest", "fallback"]
 
@@ -72,10 +72,11 @@ def choose_models(
     *,
     unavailable: str | None = None,
 ) -> tuple[ModelChoice, ...]:
-    """One choice per stage. ``listed`` None means the list could not be
+    """One choice per trading-cycle stage (the forecast stage's arms are
+    pinned in ``forecast``, never tracked). ``listed`` None means the list could not be
     read; ``unavailable`` says why, for the event."""
     choices: list[ModelChoice] = []
-    for stage in ReasoningStage:
+    for stage in PIPELINE_STAGES:
         block = brain.stage(stage.value)
         if block.track is None:
             choices.append(
@@ -121,7 +122,7 @@ def resolve_models(llm: LLMClient, brain: BrainConfig) -> tuple[ModelChoice, ...
     """Read the model list from ``llm`` (only when a stage tracks a family)
     and choose. A client without ``list_models`` or a failing list call
     means every tracked stage falls back to its pin."""
-    if all(brain.stage(stage.value).track is None for stage in ReasoningStage):
+    if all(brain.stage(stage.value).track is None for stage in PIPELINE_STAGES):
         return choose_models(brain, None)
     lister = getattr(llm, "list_models", None)
     if lister is None:

@@ -164,7 +164,8 @@ class TestSnapshotFixture:
 
 # The shipped template versions. Bump the file's version line whenever its
 # wording changes — the version is what proposals record — and pin it here.
-SHIPPED_VERSIONS = {"system": "system-v1", "scan": "scan-v2", "thesis": "thesis-v1", "proposal": "proposal-v1"}
+SHIPPED_VERSIONS = {"system": "system-v1", "scan": "scan-v2", "thesis": "thesis-v2", "proposal": "proposal-v2",
+                    "forecast": "forecast-v1"}
 
 
 class TestTemplates:
@@ -193,7 +194,7 @@ class TestTemplates:
     def test_prompt_version_shape(self, stage):
         version = prompt_version(stage)
         assert version == f"{SHIPPED_VERSIONS[stage.value]}+{SHIPPED_VERSIONS['system']}"
-        assert re.fullmatch(r"(scan|thesis|proposal)-v\d+\+system-v\d+", version)
+        assert re.fullmatch(r"(scan|thesis|proposal|forecast)-v\d+\+system-v\d+", version)
 
     def test_parse_template_requires_version_line(self):
         with pytest.raises(BrainError, match="prompt template for scan"):
@@ -888,3 +889,16 @@ def test_prompts_package_does_not_touch_execution_or_the_api():
     assert "aegis.execution" not in source and "from aegis import execution" not in source
     assert "import anthropic" not in source and "from anthropic" not in source
     assert "aegis.data.market" not in source and "aegis.data.news" not in source
+
+
+class TestConfidenceDefinition:
+    """thesis-v2 / proposal-v2: a directional confidence is the probability
+    of a stated event, the one the scorecard grades it on."""
+
+    @pytest.mark.parametrize("name", ["thesis", "proposal"])
+    def test_the_templates_state_the_event_and_its_horizon(self, name):
+        body = load_template(name).body
+        assert "closes above (bullish) or below (bearish) its current price" in body
+        assert "on the close $confidence_horizon trading sessions from now" in body
+        assert "neutral" in body
+

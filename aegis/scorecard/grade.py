@@ -42,6 +42,7 @@ from datetime import date, datetime, time
 from functools import partial
 from zoneinfo import ZoneInfo
 
+from aegis.brain.models import CONFIDENCE_HORIZON_SESSIONS, confidence_is_defined
 from aegis.data.models import Bar, OptionType
 from aegis.scorecard.models import (
     Direction,
@@ -239,6 +240,7 @@ def score_proposal(
         side=inputs.side,
         confidence=inputs.confidence,
         proposal_model=inputs.proposal_model,
+        prompt_version=inputs.prompt_version,
         thesis_model=inputs.thesis_model,
         model_source=inputs.model_source,
         verdict=inputs.verdict,
@@ -257,6 +259,18 @@ def _mean(values: Sequence[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
 
+def _confidence_scored(
+    graded: Sequence[ScoredProposal], results: Sequence[HorizonResult], days: int
+) -> list[tuple[ScoredProposal, HorizonResult]]:
+    """The graded calls whose confidence is a probability of this horizon's
+    hit: the ``CONFIDENCE_HORIZON_SESSIONS`` horizon only, and only proposals
+    written under the defined meaning. An older proposal's confidence named
+    no event, so scoring it against any horizon would be meaningless."""
+    if days != CONFIDENCE_HORIZON_SESSIONS:
+        return []
+    return [(p, r) for p, r in zip(graded, results) if confidence_is_defined(p.prompt_version)]
+
+
 def _group_summary(
     name: str, members: Sequence[ScoredProposal], index: int, days: int
 ) -> GroupSummary:
@@ -268,6 +282,8 @@ def _group_summary(
     moves = [result.underlying_return or 0.0 for result in results]
     signs = [1 if p.direction == "bullish" else -1 for p in graded]
     hit_interval = wilson_interval(hits, len(graded))
+    confident = _confidence_scored(graded, results, days)
+    confident_hit_rate = _mean([1.0 if r.hit else 0.0 for _, r in confident])
     return_interval = mean_interval(signed)
     options = [p.horizons[index].option_hit for p in members]
     option_results = [hit for hit in options if hit is not None]
@@ -280,11 +296,12 @@ def _group_summary(
         hits=hits,
         hit_rate=hit_rate,
         avg_directional_return=_mean(signed),
-        avg_confidence=_mean([p.confidence for p in graded]),
-        brier=_mean(
-            [(p.confidence - (1.0 if r.hit else 0.0)) ** 2 for p, r in zip(graded, results)]
+        confidence_graded=len(confident),
+        avg_confidence=_mean([p.confidence for p, _ in confident]),
+        brier=_mean([(p.confidence - (1.0 if r.hit else 0.0)) ** 2 for p, r in confident]),
+        brier_reference=(
+            confident_hit_rate * (1 - confident_hit_rate) if confident_hit_rate is not None else None
         ),
-        brier_reference=hit_rate * (1 - hit_rate) if hit_rate is not None else None,
         no_entry=sum(1 for p in members if p.entry_price is None),
         hit_rate_low=hit_interval[0] if hit_interval else None,
         hit_rate_high=hit_interval[1] if hit_interval else None,

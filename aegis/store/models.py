@@ -5,7 +5,9 @@ reassembled lineage of one proposal) and ``StoreStatus`` (what
 ``aegis.cli.db status`` reports). The repository writes these verbatim and
 reads them back, so the column names in ``migrations/`` (``0001_initial.sql``,
 with ``reasoning`` rebuilt and ``proposal_legs`` added by
-``0002_reasoning_cycles_and_legs.sql``) are exactly these field names.
+``0002_reasoning_cycles_and_legs.sql``, and widened to the forecast stage by
+``0005_forecasts.sql``, which also adds ``forecast_runs`` and ``forecasts``)
+are exactly these field names.
 
 The one table that is not a journal of records is ``controls``
 (``0003_controls.sql``): two fixed key/value rows — the kill switch and the
@@ -77,6 +79,55 @@ class ReasoningStage(str, Enum):
     SCAN = "scan"
     THESIS = "thesis"
     PROPOSAL = "proposal"
+    FORECAST = "forecast"
+
+
+PIPELINE_STAGES: tuple[ReasoningStage, ...] = (
+    ReasoningStage.SCAN,
+    ReasoningStage.THESIS,
+    ReasoningStage.PROPOSAL,
+)
+"""The three stages of a trading cycle, in order. ``FORECAST`` is not one of
+them: it runs on its own (``aegis.brain.forecast``) and never proposes."""
+
+
+class ForecastArm(str, Enum):
+    """Which model answered a forecast run: the pinned primary model, or the
+    cheaper shadow model run on the same inputs for comparison."""
+
+    PRIMARY = "primary"
+    SHADOW = "shadow"
+
+
+class ForecastEvent(str, Enum):
+    """What a forecast's probability is of (``aegis.forecasts.events`` defines
+    each exactly): the stock's adjusted close-to-close return beating the
+    benchmark's over the horizon, or the benchmark itself closing up."""
+
+    BEATS_BENCHMARK = "beats_benchmark"
+    UP = "up"
+
+
+FORECAST_EVENT_VERSION = "close-to-close-v1"
+"""Names the event rules every forecast row is written under: adjusted
+close-to-close from the anchor session's close, a tie counts as "no". A
+change to those rules is a new version, so old and new rows never mix."""
+
+FORECAST_HORIZONS: tuple[int, ...] = (1, 5)
+"""Sessions after the anchor close at which every forecast is asked: the
+next session (the pre-registered primary test) and five sessions
+(secondary). Fixed, not tunable: the prompt and the output schema name
+these two horizons, so changing them is a new event version."""
+
+PRIMARY_HORIZON = 1
+"""The horizon of the pre-registered primary test."""
+
+PROBABILITY_FLOOR = 0.05
+PROBABILITY_CEILING = 0.95
+"""Every stored forecast lies in [0.05, 0.95]: a wrong forecast of 0 or 1
+scores infinite log loss, and no daily stock move is that certain. Fixed,
+not tunable: the bound is part of the event definition, the prompt states
+it, and migration 0005's CHECK repeats it."""
 
 
 class Verdict(str, Enum):
@@ -254,6 +305,67 @@ class Reasoning(StoreRecord):
         if self.cycle_id is None and self.proposal_id is None:
             raise ValueError("a reasoning row needs a cycle_id or a proposal_id (or both)")
         return self
+
+
+class ForecastRun(StoreRecord):
+    """One run of one forecast arm: when and on what the model forecast.
+
+    ``inputs_taken_at`` is when the market data was read and
+    ``completed_at`` when the forecasts were written; ``anchor_session`` is
+    the trading date whose close starts every forecast's clock. ``universe``
+    lists the tickers asked, in prompt order, and ``inputs`` is exactly what
+    the model saw (prices with their timestamps, headline times), as JSON.
+    """
+
+    arm: ForecastArm
+    inputs_taken_at: datetime
+    completed_at: datetime = Field(default_factory=utcnow)
+    anchor_session: date
+    benchmark: str
+    model_name: str
+    """The model that answered."""
+    requested_model: str
+    """The model the arm's config asked for (what the cost estimate prices)."""
+    prompt_version: str
+    event_version: str
+    universe: tuple[str, ...] = Field(min_length=1)
+    inputs: dict[str, Any]
+
+    @field_validator("benchmark")
+    @classmethod
+    def _benchmark_upper(cls, value: str) -> str:
+        return _upper_symbol(value)
+
+    @field_validator("universe")
+    @classmethod
+    def _universe_upper(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        cleaned = tuple(_upper_symbol(symbol) for symbol in value)
+        if len(set(cleaned)) != len(cleaned):
+            raise ValueError("forecast universe must not repeat a symbol")
+        return cleaned
+
+    @model_validator(mode="after")
+    def _completed_after_inputs(self) -> ForecastRun:
+        if self.completed_at < self.inputs_taken_at:
+            raise ValueError("a forecast run cannot complete before its inputs were taken")
+        return self
+
+
+class ForecastRecord(StoreRecord):
+    """One probability: ``symbol``'s ``event`` over ``horizon_sessions``
+    sessions, from the close of the run's ``anchor_session``."""
+
+    run_id: str
+    symbol: str
+    event: ForecastEvent
+    horizon_sessions: int = Field(gt=0)
+    probability: float = Field(ge=PROBABILITY_FLOOR, le=PROBABILITY_CEILING)
+    rationale: str
+
+    @field_validator("symbol")
+    @classmethod
+    def _symbol_upper(cls, value: str) -> str:
+        return _upper_symbol(value)
 
 
 class PolicyDecision(StoreRecord):
@@ -479,7 +591,7 @@ class StoreStatus(BaseModel):
     applied_migrations: tuple[str, ...]
     pending_migrations: tuple[str, ...]
     row_counts: dict[str, int]
-    """Table name → row count for all eleven tables (0 for a table that does not
+    """Table name → row count for all thirteen tables (0 for a table that does not
     exist). ``controls`` counts 2 in a migrated store: its two seeded rows."""
     missing_tables: tuple[str, ...] = ()
     """Tables a fully migrated database must have but lacks — one was dropped by hand.

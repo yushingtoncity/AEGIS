@@ -22,6 +22,7 @@ nothing here interprets it.
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from enum import Enum
 from typing import Literal
@@ -30,7 +31,14 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from aegis.data.models import OptionType
 from aegis.pricing.models import Greeks, PositionSummary
-from aegis.store.models import Instrument, OrderSide, OrderType, ReasoningStage
+from aegis.store.models import (
+    PROBABILITY_CEILING,
+    PROBABILITY_FLOOR,
+    Instrument,
+    OrderSide,
+    OrderType,
+    ReasoningStage,
+)
 
 # --- shared -------------------------------------------------------------------
 
@@ -190,6 +198,31 @@ class Direction(str, Enum):
     BULLISH = "bullish"
     BEARISH = "bearish"
     NEUTRAL = "neutral"
+
+
+CONFIDENCE_HORIZON_SESSIONS = 5
+"""What a bullish or bearish candidate's (and proposal's) ``confidence`` is
+a probability of, from thesis-v2 and proposal-v2 on: that the underlying
+closes above (bullish) or below (bearish) its price at proposal time on the
+close this many trading sessions later. A neutral structure's confidence
+keeps its older, undefined meaning. Fixed, not tunable: changing it would
+change the meaning of every stored confidence. The proposal scorecard grades
+confidence at this horizon only, and ``risk_limits.min_confidence`` reads it
+unchanged."""
+
+CONFIDENCE_DEFINED_FROM = 2
+"""The first proposal prompt version (``proposal-v2``) that asked for that
+probability. Confidence from an earlier proposal named no event, so the
+scorecard never scores it."""
+
+_PROPOSAL_PROMPT = re.compile(r"proposal-v(\d+)\b")
+
+
+def confidence_is_defined(prompt_version: str | None) -> bool:
+    """Whether a stored proposal's confidence carries the defined meaning,
+    from the ``prompt_version`` it was written under."""
+    match = _PROPOSAL_PROMPT.match(prompt_version or "")
+    return match is not None and int(match.group(1)) >= CONFIDENCE_DEFINED_FROM
 
 
 class OptionStructure(str, Enum):
@@ -459,3 +492,116 @@ class CycleResult(Frozen):
     @property
     def total_tokens_out(self) -> int:
         return sum(u.tokens_out for u in self.usage)
+
+
+# --- forecast stage -----------------------------------------------------------
+
+
+ForecastRole = Literal["stock", "benchmark"]
+
+
+class ForecastTicker(Frozen):
+    """What the forecast stage is shown about one ticker.
+
+    Every price-derived figure comes from split- and dividend-adjusted daily
+    closes of COMPLETED sessions (``last_close_session`` is the latest), so
+    a partial bar for today never enters them. ``price`` is the latest IEX
+    trade or quote as of ``price_time`` and ``today_pct`` its move from that
+    last close. Percent fields are in percent units (1.5 means 1.5%);
+    ``rel_*`` are the stock's return minus the benchmark's over the same
+    sessions. ``headlines`` are UNTRUSTED text, published before the run's
+    ``taken_at``.
+    """
+
+    symbol: str
+    role: ForecastRole
+    price: float | None = None
+    price_time: datetime | None = None
+    price_age_seconds: float | None = None
+    stale: bool = False
+    last_close: float | None = None
+    last_close_session: date | None = None
+    today_pct: float | None = None
+    rel_today_pct: float | None = None
+    return_1d_pct: float | None = None
+    return_5d_pct: float | None = None
+    return_20d_pct: float | None = None
+    rel_5d_pct: float | None = None
+    rel_20d_pct: float | None = None
+    range_20d_position: float | None = None
+    """Where ``last_close`` sits in the 20-session low-high range: 0 at the low, 1 at the high."""
+    volatility_20d_pct: float | None = None
+    """Standard deviation of the last 20 daily close-to-close returns, in percent."""
+    headlines: tuple[HeadlineItem, ...] = ()
+    errors: tuple[str, ...] = ()
+
+
+class ForecastInputs(Frozen):
+    """Everything one forecast run is shown, taken once and shared by both arms.
+
+    ``anchor_session`` is the trading date in progress when the inputs were
+    taken: its close starts the clock of every forecast in the run.
+    ``tickers`` lists the universe in config order, then the benchmark.
+    """
+
+    taken_at: datetime
+    anchor_session: date
+    benchmark: str
+    tickers: tuple[ForecastTicker, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _one_benchmark_last(self) -> "ForecastInputs":
+        roles = [ticker.role for ticker in self.tickers]
+        if roles.count("benchmark") != 1 or self.tickers[-1].role != "benchmark":
+            raise ValueError("forecast inputs need exactly one benchmark ticker, listed last")
+        if self.tickers[-1].symbol != self.benchmark:
+            raise ValueError("the benchmark ticker must be the configured benchmark")
+        symbols = [ticker.symbol for ticker in self.tickers]
+        if len(set(symbols)) != len(symbols):
+            raise ValueError("forecast inputs must not repeat a ticker")
+        return self
+
+    @property
+    def symbols(self) -> tuple[str, ...]:
+        """Every ticker asked, universe first, benchmark last."""
+        return tuple(ticker.symbol for ticker in self.tickers)
+
+
+class TickerForecast(Frozen):
+    """The model's two probabilities for one ticker (see the forecast prompt
+    for the events), each in [0.05, 0.95], and one short line of why."""
+
+    symbol: str
+    p_next_session: float = Field(ge=PROBABILITY_FLOOR, le=PROBABILITY_CEILING)
+    p_five_sessions: float = Field(ge=PROBABILITY_FLOOR, le=PROBABILITY_CEILING)
+    rationale: str
+
+    @field_validator("symbol")
+    @classmethod
+    def _upper(cls, value: str) -> str:
+        return _non_blank(value, "symbol").upper()
+
+    @field_validator("rationale")
+    @classmethod
+    def _text(cls, value: str) -> str:
+        return _non_blank(value, "rationale")
+
+
+class ForecastOutput(Frozen):
+    """One ``TickerForecast`` per ticker asked; ``forecast.py`` checks that
+    the set matches the inputs exactly."""
+
+    forecasts: tuple[TickerForecast, ...] = Field(min_length=1)
+
+
+class ForecastRunResult(Frozen):
+    """What one arm's run did: its run id, outcome and spend."""
+
+    run_id: str
+    arm: str
+    outcome: Literal["written", "halted", "failed"]
+    model_name: str | None = None
+    forecasts: int = 0
+    usage: StageUsage | None = None
+    estimated_cost_usd: float | None = None
+    detail: str | None = None
