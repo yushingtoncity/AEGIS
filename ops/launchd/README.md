@@ -9,7 +9,7 @@ always, whether anything is sent at all.
 
 | Job | When | What |
 |---|---|---|
-| `local.aegis.cycle` | weekdays 10:00, 11:30, 13:30, 15:00 local (New York) time | market check, `brain once`, `policy evaluate <the id it printed>`, `orders tick`, `notify send` |
+| `local.aegis.cycle` | weekdays 10:00, 11:30, 13:30, 15:00 local (New York) time | market check, `brain once`, `policy evaluate <the id it printed>`, `orders tick`, `notify send`. The 15:00 cycle then runs `forecasts run` (the day's per-ticker forecasts) |
 | `local.aegis.tick` | every 5 minutes, but only acts 09:25 to 16:30 ET on weekdays | market open: `orders tick`, `notify send`. Close to 16:30: `orders sync`, `notify send` (places nothing) |
 
 Both jobs call `aegis-run.sh` with this checkout's `.venv/bin/python`. The
@@ -25,6 +25,10 @@ following rules apply:
   jobs, so no two steps ever run at once. Two `notify send` runs could
   otherwise text the same notice twice. A step that finds the lock taken logs
   `skipped: busy`. A lock whose owner has died is cleared.
+- **Forecasts:** only a cycle between 15:00 and 16:00 ET runs `forecasts run`,
+  after the trading steps, so it never delays them. It makes one run per arm
+  per day (a repeat skips), refuses while `forecast.enabled` is false (logged
+  as `exit 1`), and nothing that trades reads what it writes.
 - **Logs:** they go to `~/Library/Logs/AEGIS/cycle.log` and `tick.log`. A log
   rolls over at 10 MB, keeping one old copy. The store stays the record, and
   `python -m aegis.cli.trace` shows it.
@@ -40,7 +44,9 @@ following rules apply:
   nothing runs until someone logs in.
 - **Cost:** each cycle makes three Claude calls, about $0.06 to $0.11 by the
   config's price estimates. `brain.daily_token_budget` caps a day whatever the
-  schedule. `python -m aegis.cli.brain usage` shows the real figure.
+  schedule. `python -m aegis.cli.brain usage` shows the real figure. The daily
+  forecast adds two calls (the primary and shadow arms); `forecasts run`
+  prints each arm's tokens and estimated cost in `cycle.log`.
 
 ## Install, pause, remove
 

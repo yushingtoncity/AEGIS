@@ -113,6 +113,28 @@ def test_a_cycle_judges_the_proposal_its_brain_run_printed_then_ticks_and_notifi
     assert "SPY (equity)" in log(box, "cycle")
 
 
+def test_the_15_00_cycle_makes_the_days_forecasts_after_the_trading_steps(box: Path) -> None:
+    assert run(box, "cycle", brain=NO_TRADE, ny_clock="3 1500").returncode == 0
+    assert calls(box) == [
+        "aegis.cli.brain once",
+        "aegis.cli.orders tick",
+        "aegis.cli.notify send",
+        "aegis.cli.forecasts run",
+    ]
+    assert "exit 0: aegis.cli.forecasts run" in log(box, "cycle")
+
+
+@pytest.mark.parametrize("ny_clock", ["3 1000", "3 1130", "3 1330", "3 1459", "3 1600"])
+def test_no_other_cycle_makes_forecasts(box: Path, ny_clock: str) -> None:
+    run(box, "cycle", brain=NO_TRADE, ny_clock=ny_clock)
+    assert "aegis.cli.forecasts run" not in calls(box)
+
+
+def test_a_closed_market_makes_no_forecasts_either(box: Path) -> None:
+    run(box, "cycle", market="closed", ny_clock="3 1500")
+    assert calls(box) == []
+
+
 def test_a_cycle_without_a_proposal_judges_nothing(box: Path) -> None:
     run(box, "cycle", brain=NO_TRADE)
     assert calls(box) == ["aegis.cli.brain once", "aegis.cli.orders tick", "aegis.cli.notify send"]
