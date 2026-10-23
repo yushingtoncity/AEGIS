@@ -2,7 +2,8 @@
 # Run one scheduled AEGIS step on the mini. launchd calls this; see
 # ops/launchd/README.md.
 #
-#   aegis-run.sh cycle   market open: brain once, judge its proposal, tick, notify
+#   aegis-run.sh cycle   market open: brain once, judge its proposal, tick, notify;
+#                        the 15:00 cycle then makes the day's forecasts
 #   aegis-run.sh tick    market open: tick, notify; close to 16:30 ET: sync, notify
 #
 # Only existing CLI commands run here: the policy engine still judges every
@@ -23,6 +24,8 @@ MAX_LOG_BYTES=10485760        # roll a log over at 10 MB, keeping one old copy
 STALE_LOCK_MINUTES=10         # a lock with no live owner older than this is cleared
 TICK_WINDOW_START=925         # the tick asks the market clock from 09:25 ET on weekdays...
 WRAP_UP_END=1630              # ...to 16:30 ET: after the close it syncs and notifies, placing nothing
+FORECAST_FROM=1500            # a cycle from 15:00 ET until the close also runs `forecasts run` (once a day:
+FORECAST_UNTIL=1600           # it skips an arm that already ran today, and refuses while forecast.enabled is false)
 
 MODE="${1:-}"
 case "$MODE" in
@@ -112,6 +115,10 @@ run_cycle() {
   fi
   step aegis.cli.orders tick
   step aegis.cli.notify send
+  # last, so the trading steps never wait on it; it reads nothing they write
+  if [ "$NY_HHMM" -ge "$FORECAST_FROM" ] && [ "$NY_HHMM" -lt "$FORECAST_UNTIL" ]; then
+    step aegis.cli.forecasts run
+  fi
   log "done"
 }
 
