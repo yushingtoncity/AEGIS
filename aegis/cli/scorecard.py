@@ -12,7 +12,12 @@ underlying's split- and dividend-adjusted close a few trading sessions later
 (``scorecard.horizons_days`` in config.yaml). The summary shows, per group
 and horizon, how many calls were graded, the hit rate and the average signed
 return (positive means the calls were right on average) with 95% intervals,
-the average confidence and the Brier score next to its base-rate reference.
+and, at the 5-session horizon only, the average confidence and the Brier
+score next to its base-rate reference. Confidence is scored only for
+proposals written under prompt proposal-v2 or later, where a bullish or
+bearish call's confidence is the probability that the underlying closes the
+called way 5 sessions later (``aegis.brain.models.CONFIDENCE_HORIZON_SESSIONS``);
+an older proposal's confidence named no event and is never scored.
 A second table sets the same calls beside two no-skill baselines (always
 long the same names, and the same calls with directions shuffled) and, for
 options, the share with a positive estimated P&L after theta and the spread.
@@ -52,7 +57,9 @@ BAR_FETCH_PADDING_DAYS = 7  # calendar days of slack before the first proposal, 
 LEGEND = (
     "",
     "hit rate and avg signed: the calls' record, with 95% intervals (Wilson; Student t).",
-    "ref: the Brier score of always forecasting the group's own hit rate; beat it, not 0.25.",
+    "avg conf, brier, ref: 5-session row only, on proposals from prompt proposal-v2 on (conf n of them);",
+    "  confidence there is the chance the underlying closes the called way 5 sessions later.",
+    "ref: the Brier score of always forecasting those calls' own hit rate; beat it, not 0.25.",
     "long hit / long avg: what always buying the same names on the same dates got (drift).",
     "shuffle p: chance the same calls with directions shuffled do as well (1.0 = all one way).",
     "option P&L wins: structures with a positive estimated P&L after theta and the spread.",
@@ -196,7 +203,7 @@ def _print_scorecard(card: Scorecard, detail: bool, errors: Sequence[str]) -> No
     print()
     print(
         f"{'group':<{width}}  {'days':>4}  {'graded':>8}  {'hit rate (95% CI)':>17}"
-        f"  {'avg signed (95% CI)':>25}  {'avg conf':>8}  {'brier':>6}  {'ref':>6}"
+        f"  {'avg signed (95% CI)':>25}  {'conf n':>6}  {'avg conf':>8}  {'brier':>6}  {'ref':>6}"
     )
     for summary in card.summaries:
         graded = f"{summary.graded}/{summary.proposals}"
@@ -207,7 +214,8 @@ def _print_scorecard(card: Scorecard, detail: bool, errors: Sequence[str]) -> No
         ).strip()
         print(
             f"{summary.group:<{width}}  {summary.horizon_days:>4}  {graded:>8}  {hit:>17}"
-            f"  {signed:>25}  {_num(summary.avg_confidence, '.2f'):>8}"
+            f"  {signed:>25}  {summary.confidence_graded if summary.confidence_graded else '-':>6}"
+            f"  {_num(summary.avg_confidence, '.2f'):>8}"
             f"  {_num(summary.brier, '.3f'):>6}  {_num(summary.brier_reference, '.3f'):>6}"
         )
     print()

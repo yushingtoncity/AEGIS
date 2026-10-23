@@ -43,11 +43,14 @@ from typing import Literal
 
 from aegis.brain.errors import BrainError
 from aegis.brain.models import (
+    CONFIDENCE_HORIZON_SESSIONS,
     STRIKES_PER_STRUCTURE,
     AccountSummary,
     ChainSummary,
     ContractSummary,
     DataAge,
+    ForecastInputs,
+    ForecastTicker,
     Frozen,
     HeadlineItem,
     InstrumentOffer,
@@ -65,12 +68,13 @@ from aegis.store.models import Instrument, OrderSide, Proposal, ReasoningStage
 
 PROMPTS_DIR = Path(__file__).resolve().parent
 
-TemplateName = Literal["system", "scan", "thesis", "proposal"]
-TEMPLATE_NAMES: tuple[TemplateName, ...] = ("system", "scan", "thesis", "proposal")
+TemplateName = Literal["system", "scan", "thesis", "proposal", "forecast"]
+TEMPLATE_NAMES: tuple[TemplateName, ...] = ("system", "scan", "thesis", "proposal", "forecast")
 _STAGE_TEMPLATE: dict[ReasoningStage, TemplateName] = {
     ReasoningStage.SCAN: "scan",
     ReasoningStage.THESIS: "thesis",
     ReasoningStage.PROPOSAL: "proposal",
+    ReasoningStage.FORECAST: "forecast",
 }
 
 NEWS_DELIM_OPEN = "<<<UNTRUSTED_NEWS_BEGIN>>>"
@@ -199,7 +203,7 @@ def load_template(name: TemplateName) -> PromptTemplate:
 
 
 def prompt_version(stage: ReasoningStage) -> str:
-    """``"<stage template version>+<system version>"``, e.g. ``proposal-v1+system-v1``
+    """``"<stage template version>+<system version>"``, e.g. ``proposal-v2+system-v1``
     — what gets recorded on the stage's result and the proposal row."""
     return f"{load_template(_STAGE_TEMPLATE[stage]).version}+{load_template('system').version}"
 
@@ -617,6 +621,7 @@ def build_thesis_prompt(
         contracts=_contracts_block(snapshot),
         structures=_structures_block(),
         max_candidates=MAX_THESIS_CANDIDATES,
+        confidence_horizon=CONFIDENCE_HORIZON_SESSIONS,
     )
 
 
@@ -808,6 +813,62 @@ def build_proposal_prompt(
         pricing=_pricing_block(offer),
         account=_account_line(account),
         data_age=_data_age_block(data_age),
+        confidence_horizon=CONFIDENCE_HORIZON_SESSIONS,
+    )
+
+
+# --- forecast -----------------------------------------------------------------
+
+
+def _forecast_ticker_block(ticker: ForecastTicker) -> str:
+    label = " (benchmark)" if ticker.role == "benchmark" else ""
+    position = (
+        _MISSING if ticker.range_20d_position is None else f"{ticker.range_20d_position:.2f}"
+    )
+    lines = [
+        f"### {ticker.symbol}{label}{_stale(ticker.stale)}",
+        f"price {_num(ticker.price)} as of {_ts(ticker.price_time)}, {_age(ticker.price_age_seconds)}"
+        f"{_stale(ticker.stale)}; today {_change(ticker.today_pct)}"
+        + ("" if ticker.role == "benchmark" else f" (rel {_change(ticker.rel_today_pct)})"),
+        f"last close {_num(ticker.last_close)} on {ticker.last_close_session or 'unknown'}; "
+        f"1-session {_change(ticker.return_1d_pct)}, 5-session {_change(ticker.return_5d_pct)}"
+        + ("" if ticker.role == "benchmark" else f" (rel {_change(ticker.rel_5d_pct)})")
+        + f", 20-session {_change(ticker.return_20d_pct)}"
+        + ("" if ticker.role == "benchmark" else f" (rel {_change(ticker.rel_20d_pct)})"),
+        f"20-session range position {position} (0 = low, 1 = high); "
+        f"daily volatility {_MISSING if ticker.volatility_20d_pct is None else f'{ticker.volatility_20d_pct:.2f}%'}",
+    ]
+    if ticker.errors:
+        lines.append(f"errors:\n{_bullets(neutralise_untrusted(e) for e in ticker.errors)}")
+    return "\n".join(lines)
+
+
+def _forecast_news_block(tickers: Sequence[ForecastTicker]) -> str:
+    """Every ticker's headlines, grouped by ticker, every piece of news text
+    neutralised (the scan prompt's shape)."""
+    lines: list[str] = []
+    for ticker in tickers:
+        lines.append(f"{neutralise_untrusted(ticker.symbol)}:")
+        if ticker.headlines:
+            lines.extend(_headline_line(item) for item in ticker.headlines)
+        else:
+            lines.append("- (no headlines)")
+    return "\n".join(lines) or "(no headlines)"
+
+
+def build_forecast_prompt(inputs: ForecastInputs) -> str:
+    """The forecast stage's user message: the event definitions, how it is
+    scored, one block per ticker (universe order, benchmark last), the
+    delimited news block and the task."""
+    return load_template("forecast").render(
+        taken_at=_ts(inputs.taken_at),
+        anchor_session=inputs.anchor_session.isoformat(),
+        benchmark=inputs.benchmark,
+        tickers="\n\n".join(_forecast_ticker_block(t) for t in inputs.tickers),
+        guard=INJECTION_GUARD,
+        news_open=NEWS_DELIM_OPEN,
+        news=_forecast_news_block(inputs.tickers),
+        news_close=NEWS_DELIM_CLOSE,
     )
 
 
@@ -821,6 +882,7 @@ __all__ = [
     "TEMPLATE_NAMES",
     "NetQuote",
     "PromptTemplate",
+    "build_forecast_prompt",
     "build_proposal_prompt",
     "build_scan_prompt",
     "build_thesis_prompt",

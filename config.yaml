@@ -231,3 +231,70 @@ scorecard:
   # option structure is non-directional (a condor, a straddle) and is left out
   # of hit rates. 0.10 is about what a balanced iron condor shows.
   neutral_delta: 0.10
+
+# Per-ticker forecasts (aegis/brain/forecast.py, scored by
+# `python -m aegis.cli.forecasts score`). Once a trading day the model gives,
+# for each universe ticker, the probability that its split- and
+# dividend-adjusted close-to-close return beats the benchmark's over the next
+# session and over 5 sessions, starting from that day's close; the benchmark
+# itself gets "closes up". A MEASURING INSTRUMENT ONLY: forecasts go to their
+# own tables and nothing that can place an order reads them. The universe is
+# what gets forecast, not what may be traded (watchlist and
+# risk_limits.watchlist_only above are unchanged by it).
+forecast:
+  enabled: false                 # off until you turn it on, on the mini; `forecasts run` refuses while false
+  benchmark: SPY                 # the relative event's yardstick; forecast on its own "up" event
+  # Frozen for the experiment: two or three liquid large caps per sector, so
+  # the stocks are less correlated with each other than the trading
+  # watchlist, plus two game publishers (TTWO, EA). Adding a name after it did well
+  # would bias the sample; change the list only as a new, dated experiment.
+  universe:
+    - AAPL    # tech
+    - MSFT
+    - NVDA
+    - AVGO
+    - GOOGL   # communication, incl. gaming
+    - META
+    - TTWO
+    - EA
+    - AMZN    # consumer discretionary
+    - HD
+    - MCD
+    - PG      # consumer staples
+    - KO
+    - WMT
+    - JNJ     # health care, incl. pharma
+    - UNH
+    - LLY
+    - MRK
+    - JPM     # financials
+    - BAC
+    - GS
+    - V
+    - XOM     # energy
+    - CVX
+    - CAT     # industrials
+    - UPS
+    - BA
+    - NEE     # utilities
+    - LIN     # materials
+    - PLD     # real estate
+  headlines_per_symbol: 3        # recent headlines per ticker; 3 keeps a 31-ticker prompt near 9k input tokens
+  bars_lookback_days: 45         # calendar days of daily bars read: enough for 20 completed sessions plus holidays
+  stale_after_minutes: 15        # a 15:00 price older than this is marked [STALE] in the prompt (the score starts at the close, so it never depends on it)
+  # Each arm is pinned (track must stay null) so one model answers for the
+  # whole experiment; a new model is a new, separate sample. max_tokens: 31
+  # tickers x two probabilities and a short line (~2k tokens) plus low-effort
+  # thinking. PLACEHOLDER until the first live runs are measured.
+  primary:
+    model: claude-opus-5-5
+    max_tokens: 8000
+    effort: low
+  shadow:                        # the same inputs through a ~40x cheaper model, as a comparison; null to skip
+    model: claude-haiku-5-5
+    max_tokens: 8000
+    effort: low
+  score:
+    baseline_lookback_sessions: 250   # about a trading year of past outcomes behind each base-rate and signal baseline
+    baseline_min_samples: 100         # fewer past outcomes than this and a baseline says 0.5 rather than guess from noise
+    bootstrap_samples: 2000           # resamples of whole dates for each interval; Monte Carlo error well under the interval's width

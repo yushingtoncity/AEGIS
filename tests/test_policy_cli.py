@@ -66,7 +66,7 @@ from aegis.store.repo import (
 )
 
 CLI_SOURCE = REPO_ROOT / "aegis" / "cli" / "policy.py"
-MIGRATIONS = ("0001_initial", "0002_reasoning_cycles_and_legs", "0003_controls", "0004_execution")
+MIGRATIONS = ("0001_initial", "0002_reasoning_cycles_and_legs", "0003_controls", "0004_execution", "0005_forecasts")
 
 RULE_LINE = re.compile(r"^  \[ ?(\d+)\] (\S+) {3,}(\S+) {3,}(.*)$")
 """One printed rule: ``  [ 4] daily_loss_limit   PASS   <detail>``."""
@@ -1302,7 +1302,7 @@ class TestEvaluate:
 
     def test_recording_migrates_a_database_that_exists(self, store, capsys):
         drop_migration_0003(store)
-        assert versions_of(store) == {1: MIGRATIONS[0], 2: MIGRATIONS[1], 4: MIGRATIONS[3]}
+        assert versions_of(store) == {1: MIGRATIONS[0], 2: MIGRATIONS[1], 4: MIGRATIONS[3], 5: MIGRATIONS[4]}
         assert cli_policy.main(["evaluate", "prop-0001", "--db", str(store)],
                                context_builder=Builder()) == 0
         assert "verdict: AUTO_EXECUTE" in capsys.readouterr().out
@@ -1519,7 +1519,7 @@ class TestDryRun:
         )
         assert builder.calls == []
         assert every_row(store) == before and versions_of(store) == {
-            1: MIGRATIONS[0], 2: MIGRATIONS[1], 4: MIGRATIONS[3],
+            1: MIGRATIONS[0], 2: MIGRATIONS[1], 4: MIGRATIONS[3], 5: MIGRATIONS[4],
         }
 
     def test_an_unmigrated_file_is_refused_and_left_empty(self, db_path, capsys):

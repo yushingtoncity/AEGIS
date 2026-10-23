@@ -96,7 +96,7 @@ from aegis.config import AegisConfig, ConfigError, ModelPrice, get_config
 from aegis.data.models import utcnow
 from aegis.store.db import MEMORY_DB, connect, open_store, resolve_db_path, status
 from aegis.store.errors import StoreError
-from aegis.store.models import ReasoningStage, TokenUsage, new_id
+from aegis.store.models import PIPELINE_STAGES, ReasoningStage, TokenUsage, new_id
 from aegis.store.repo import (
     add_reasoning,
     get_cycle_reasoning,
@@ -682,7 +682,7 @@ def main(
     stage = commands.add_parser(
         "stage", parents=[common], help="run a single stage for debugging and print its raw output"
     )
-    stage.add_argument("stage", choices=[s.value for s in ReasoningStage])
+    stage.add_argument("stage", choices=[s.value for s in PIPELINE_STAGES])
     stage.add_argument(
         "--cycle",
         metavar="CYCLE_ID",

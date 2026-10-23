@@ -1,4 +1,4 @@
-<!-- version: proposal-v1 -->
+<!-- version: proposal-v2 -->
 # Proposal stage
 
 The thesis stage's best candidate has been resolved to concrete contracts and priced. Decide whether to propose it and, if so, size it and price it. The legs are fixed: you may choose the quantity, the order type and the limit price, or return no_trade with a reason.
@@ -41,5 +41,5 @@ Produce the ProposalOutput JSON object:
 - proposal: for "trade", the object {symbol, instrument, side, quantity, order_type, limit_price, thesis, confidence, invalidation, legs}; null for "no_trade"
   - symbol: exactly the "proposal symbol" shown in the offer — the OCC symbol for a single-leg option, the underlying ticker for a multi-leg structure, the ticker for an equity
   - legs: one entry per offered leg, in order, each {symbol (the OCC symbol), option_type ("call"/"put"), side ("buy"/"sell"), quantity, strike, expiration (YYYY-MM-DD)}; an empty list for an equity
-  - confidence: 0 to 1
+  - confidence: for a bullish or bearish idea, the probability (0 to 1) that the underlying closes above (bullish) or below (bearish) its current price on the close $confidence_horizon trading sessions from now; start from the candidate's and move it only if the offer's prices change the picture. For a neutral structure: 0 to 1, as the candidate gave it
 - no_trade_reason: for "no_trade", the reason; null for "trade"

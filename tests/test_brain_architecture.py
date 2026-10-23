@@ -95,7 +95,7 @@ EXECUTION = "aegis.execution"
 LIVE_FETCHERS = ("aegis.data.market", "aegis.data.account", "aegis.data.news")
 EXPECTED_MODULES = {
     "__init__.py", "errors.py", "models.py", "schemas.py", "llm.py", "testing.py", "prompts/__init__.py",
-    "snapshot.py", "stage.py", "scan.py", "thesis.py", "proposal.py", "cycle.py",
+    "snapshot.py", "stage.py", "scan.py", "thesis.py", "proposal.py", "cycle.py", "forecast.py",
 }
 
 DYNAMIC_IMPORT = "<dynamic import>"

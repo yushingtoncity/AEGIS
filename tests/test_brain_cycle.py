@@ -243,7 +243,7 @@ class TestRunCycle:
         assert proposal.confidence == 0.58
         assert proposal.raw_model_output == _text("proposal_ok.json")
         assert proposal.model_name == config.brain.stages.proposal.model
-        assert proposal.prompt_version == "proposal-v1+system-v1"
+        assert proposal.prompt_version == "proposal-v2+system-v1"
         assert [(l.leg_index, l.side, l.option_type, l.strike, l.quantity, l.expiration, l.symbol) for l in get_proposal_legs(conn, proposal.id)] == [
             (0, OrderSide.BUY, OptionType.CALL, 640.0, 2.0, date(2026, 8, 21), "SPY260821C00640000"),
             (1, OrderSide.SELL, OptionType.CALL, 650.0, 2.0, date(2026, 8, 21), "SPY260821C00650000"),
@@ -1122,7 +1122,7 @@ class TestCliStage:
         assert cli_brain.main(["stage", "proposal", "--db", str(db_path)], llm=llm, snapshot_builder=_builder(snapshot)) == 0
         out = capsys.readouterr().out
         assert "offer: SPY call_debit_spread 640/650 exp 2026-08-21" in out
-        assert "output (proposal-v1+system-v1):" in out and '"outcome": "trade"' in out
+        assert "output (proposal-v2+system-v1):" in out and '"outcome": "trade"' in out
         assert [call.stage for call in llm.calls] == STAGES
         (cycle_id,) = {call.cycle_id for call in llm.calls}
         conn = open_store(db_path)

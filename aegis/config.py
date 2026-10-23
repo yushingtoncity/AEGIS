@@ -398,6 +398,80 @@ class ScorecardConfig(BaseModel):
         return tuple(sorted(value))
 
 
+class ForecastScoreConfig(BaseModel):
+    """How the read-only forecast scorer builds its baselines and intervals."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+
+    baseline_lookback_sessions: int = Field(default=250, ge=20)
+    baseline_min_samples: int = Field(default=100, ge=1)
+    bootstrap_samples: int = Field(default=2000, ge=100)
+
+
+class ForecastConfig(BaseModel):
+    """The forecast stage: one probability per ticker per event, once a day.
+
+    A measuring instrument, never a trading input: forecasts are written to
+    their own tables and nothing that can place an order reads them. Shipped
+    with ``enabled: false``; ``forecasts run`` refuses until the operator
+    turns it on, on the mini. ``universe`` is what gets forecast, not what
+    may be traded: the trading ``watchlist`` and ``risk_limits.watchlist_only``
+    are untouched by it. The benchmark is forecast too, on its own "up"
+    event, so it must not also be in the universe.
+
+    Each arm is a pinned model (``track`` must be null): a model that moved
+    mid-experiment would mix two forecasters in one sample. ``shadow`` may
+    be null to run the primary arm alone.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+
+    enabled: StrictBool = False
+    benchmark: str = "SPY"
+    universe: tuple[str, ...] = Field(default=("AAPL", "MSFT", "NVDA"), min_length=1)
+    headlines_per_symbol: int = Field(default=3, ge=0, le=50)
+    bars_lookback_days: int = Field(default=45, ge=30)
+    stale_after_minutes: float = Field(default=15, gt=0)
+    primary: BrainStageConfig = BrainStageConfig(
+        model="claude-opus-5-5", max_tokens=8000, effort="low"
+    )
+    shadow: BrainStageConfig | None = BrainStageConfig(
+        model="claude-haiku-5-5", max_tokens=8000, effort="low"
+    )
+    score: ForecastScoreConfig = ForecastScoreConfig()
+
+    @field_validator("benchmark")
+    @classmethod
+    def _clean_benchmark(cls, value: str) -> str:
+        cleaned = value.strip().upper()
+        if not cleaned:
+            raise ValueError("forecast benchmark must not be blank")
+        return cleaned
+
+    @field_validator("universe")
+    @classmethod
+    def _clean_universe(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        cleaned = tuple(symbol.strip().upper() for symbol in value)
+        if any(not symbol for symbol in cleaned):
+            raise ValueError("forecast universe must not contain a blank symbol")
+        if len(set(cleaned)) != len(cleaned):
+            raise ValueError("forecast universe must not repeat a symbol")
+        return cleaned
+
+    @model_validator(mode="after")
+    def _pinned_arms_and_separate_benchmark(self) -> "ForecastConfig":
+        if self.benchmark in self.universe:
+            raise ValueError(
+                f"forecast benchmark {self.benchmark} must not also be in forecast.universe"
+            )
+        for name, arm in (("primary", self.primary), ("shadow", self.shadow)):
+            if arm is not None and arm.track is not None:
+                raise ValueError(
+                    f"forecast.{name}.track must be null: a forecast arm is pinned to one model"
+                )
+        return self
+
+
 class AegisConfig(BaseModel):
     """The validated contents of config.yaml."""
 
@@ -413,6 +487,7 @@ class AegisConfig(BaseModel):
     broker: BrokerConfig = BrokerConfig()
     notify: NotifyConfig = NotifyConfig()
     scorecard: ScorecardConfig = ScorecardConfig()
+    forecast: ForecastConfig = ForecastConfig()
 
     @field_validator("watchlist")
     @classmethod

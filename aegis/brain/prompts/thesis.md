@@ -1,4 +1,4 @@
-<!-- version: thesis-v1 -->
+<!-- version: thesis-v2 -->
 # Thesis stage
 
 Decide whether the market brief below supports any trade idea and, if it does, describe the best few as ThesisCandidate entries. Everything you know about the market is in the brief and the contract list: you are not shown quotes here, and you must not invent them. The snapshot behind the brief was taken at $taken_at UTC; $market.
@@ -47,7 +47,7 @@ Produce the ThesisOutput JSON object:
   - expiration: the chain expiration (YYYY-MM-DD) for an option; null for equity
   - strikes: exactly the number of strikes the structure needs, listed low to high, every one from the available list; an empty list for equity
   - rationale: why this trade, in the numbers from the brief — levels, implied vol, days to expiry, the catalyst
-  - confidence: 0 to 1, calibrated — 0.5 means a coin flip; stale data and thin liquidity lower it
+  - confidence: for a bullish or bearish candidate, the probability (0 to 1) that the underlying closes above (bullish) or below (bearish) its current price on the close $confidence_horizon trading sessions from now. 0.5 means a coin flip; stale data and thin liquidity pull it toward 0.5. For a neutral candidate: 0 to 1, calibrated, 0.5 means a coin flip; stale data and thin liquidity lower it
   - key_risk: the single thing most likely to make this lose money
   - invalidation: a falsifiable condition — a price level, a date or an event — that would prove the idea wrong
 - no_idea_reason: when candidates is empty, why (a closed or stale market, no edge at these implied vols, everything already proposed, positions full); null otherwise

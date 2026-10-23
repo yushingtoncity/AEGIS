@@ -18,7 +18,7 @@ import pytest
 from pydantic import ValidationError
 
 from aegis.brain.cycle import market_snapshot_event
-from aegis.brain.models import MarketSnapshot
+from aegis.brain.models import CONFIDENCE_HORIZON_SESSIONS, MarketSnapshot, confidence_is_defined
 from aegis.cli import scorecard as cli
 from aegis.config import REPO_ROOT, ScorecardConfig, get_config
 from aegis.data.models import Bar, OptionType
@@ -183,8 +183,32 @@ class TestGrading:
         opus, fable = by_group["claude-opus-5-5"], by_group["claude-fable-5-1"]
         assert (opus.proposals, opus.graded, opus.hits, opus.hit_rate) == (2, 2, 1, 0.5)
         assert opus.avg_directional_return == pytest.approx(0.0)
-        assert opus.brier == pytest.approx(((0.8 - 1) ** 2 + (0.6 - 0) ** 2) / 2)
+        assert opus.brier is None and opus.confidence_graded == 0  # confidence is scored at 5 sessions only
         assert (fable.graded, fable.hit_rate) == (1, 1.0)
+
+    def test_confidence_is_scored_at_five_sessions_on_defined_proposals_only(self):
+        defined, older = "proposal-v2+system-v1", "proposal-v1+system-v1"
+        items = [
+            inputs(proposal_id="a", confidence=0.8, prompt_version=defined),  # buy, right at 5d
+            inputs(proposal_id="b", confidence=0.6, side=OrderSide.SELL, prompt_version=defined),  # wrong
+            inputs(proposal_id="c", confidence=0.9, side=OrderSide.SELL, prompt_version=older),  # never scored
+            inputs(proposal_id="d", confidence=0.9),  # no prompt version recorded: never scored
+        ]
+        one, five = build_scorecard(items, {"SPY": week_of_bars()}, (1, 5), now=NOW, neutral_delta=0.1).summaries
+        assert (one.horizon_days, one.graded, one.confidence_graded, one.brier) == (1, 4, 0, None)
+        assert (five.horizon_days, five.graded, five.confidence_graded) == (5, 4, 2)
+        assert five.avg_confidence == pytest.approx(0.7)
+        assert five.brier == pytest.approx(((0.8 - 1) ** 2 + (0.6 - 0) ** 2) / 2)
+        assert five.brier_reference == pytest.approx(0.25)  # those two calls hit half the time
+        assert five.hit_rate == 0.5  # c (a wrong sell) and d (a right buy) still count toward hits
+
+    def test_which_prompt_versions_define_confidence(self):
+        assert confidence_is_defined("proposal-v2+system-v1")
+        assert confidence_is_defined("proposal-v12+system-v3")
+        assert not confidence_is_defined("proposal-v1+system-v1")
+        assert not confidence_is_defined("v1")
+        assert not confidence_is_defined(None)
+        assert CONFIDENCE_HORIZON_SESSIONS in get_config().scorecard.horizons_days
 
     def test_group_by_pair_and_unknown_group_by(self):
         items = [inputs(thesis_model="claude-opus-5-5")]
@@ -289,7 +313,7 @@ class TestSummaryBaselines:
         assert summary.long_hit_rate == 1.0  # SPY rose, so always-long was right both times
         assert summary.long_avg_return == pytest.approx(640 / 638.75 - 1)
         assert summary.shuffle_p == 1.0  # the same move twice: swapping labels changes nothing
-        assert summary.brier_reference == pytest.approx(0.25)
+        assert summary.brier_reference is None  # a 1-session horizon scores no confidence
         assert summary.option_graded == 0 and summary.option_hit_rate is None
 
     def test_an_always_bullish_model_matches_always_long_exactly(self):
@@ -481,7 +505,7 @@ class TestGather:
         finally:
             conn.close()
         assert spread.underlying == "SPY" and spread.snapshot_spot == 638.75
-        assert spread.verdict == "REJECT"
+        assert spread.verdict == "REJECT" and spread.prompt_version == "v1"
         assert (spread.thesis_model, spread.model_source) == ("claude-opus-5-5", "latest")
         assert spread.leg_deltas == {"SPY260821C00635000": 0.6302, "SPY260821C00645000": 0.4305}
         assert spread.spot_stale is False

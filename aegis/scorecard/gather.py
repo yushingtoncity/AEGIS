@@ -136,6 +136,7 @@ def gather(
                 quantity=proposal.quantity,
                 confidence=proposal.confidence,
                 proposal_model=proposal.model_name,
+                prompt_version=proposal.prompt_version,
                 thesis_model=_thesis_model(conn, proposal.cycle_id),
                 model_source=_proposal_model_source(conn, proposal.cycle_id),
                 verdict=verdict.verdict.value if verdict is not None else None,
