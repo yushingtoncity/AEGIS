@@ -246,8 +246,11 @@ forecast:
   benchmark: SPY                 # the relative event's yardstick; forecast on its own "up" event
   # Frozen for the experiment: two or three liquid large caps per sector, so
   # the stocks are less correlated with each other than the trading
-  # watchlist, plus two game publishers (TTWO, EA). Adding a name after it did well
+  # watchlist, plus two game names (TTWO, RBLX). Adding a name after it did well
   # would bias the sample; change the list only as a new, dated experiment.
+  # 2026-10-27: RBLX replaced EA, which was taken private and delisted on
+  # 2026-08-04 and had no bars, so its forecasts could never be graded. The
+  # swap was chosen for that reason, not for how either name had done.
   universe:
     - AAPL    # tech
     - MSFT
@@ -256,7 +259,7 @@ forecast:
     - GOOGL   # communication, incl. gaming
     - META
     - TTWO
-    - EA
+    - RBLX
     - AMZN    # consumer discretionary
     - HD
     - MCD
