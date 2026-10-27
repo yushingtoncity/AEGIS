@@ -112,6 +112,11 @@ class TestConfig:
         assert len(forecast.universe) == 30 and forecast.benchmark == "SPY"
         assert forecast.primary.track is None and forecast.shadow is not None and forecast.shadow.track is None
 
+    def test_the_delisted_ea_slot_went_to_rblx(self):
+        # EA was taken private on 2026-08-04 and has no bars; see the dated note in config.yaml
+        universe = get_config().forecast.universe
+        assert "EA" not in universe and "RBLX" in universe
+
     def test_enabled_must_be_a_real_boolean(self):
         with pytest.raises(ValidationError):
             ForecastConfig(enabled="yes")
