@@ -3,6 +3,7 @@
 Run:  python -m aegis.cli.notify pending [--db PATH]
       python -m aegis.cli.notify send [--db PATH]
       python -m aegis.cli.notify test
+      python -m aegis.cli.notify summary [--db PATH] [--day YYYY-MM-DD] [--logs DIR] [--dry-run]
 
 ``pending`` lists the notices a ``send`` would push now (the events at or
 above ``notify.min_level`` or of a kind in ``notify.kinds``, younger than
@@ -25,7 +26,15 @@ Failures are one line on stderr and exit 1, never a traceback, and never
 print the topic URL or the token. ``send`` exits 1 when any notice failed.
 Ctrl-C exits 130.
 
-``main(argv, *, channel_factory=None, clock=None)``: tests inject a stand-in
+``summary`` writes the end-of-day summary (``aegis.notify.summary``) as one
+``daily_summary`` event, for the next ``send`` to deliver; it writes at
+most one per New York day and says so when the day already has one. It
+reads the paper account once (a failed read is reported in the text, not
+an exit 1) and, with ``--logs``, the launchd logs in that folder.
+``--dry-run`` prints the text and writes nothing. It works with
+``notify.enabled`` off: only ``send`` pushes anything.
+
+``main(argv, *, channel_factory=None, clock=None, account_reader=None)``: tests inject a stand-in
 channel and a fixed clock.
 """
 
@@ -34,7 +43,7 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Callable
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from aegis.cli.policy import (
@@ -51,16 +60,25 @@ from aegis.cli.policy import (
     _UsageError,
 )
 from aegis.config import AegisConfig, ConfigError, NotifyConfig, get_config
-from aegis.data.models import utcnow
+from aegis.data.models import AccountState, utcnow
 from aegis.notify.errors import NotifyError
 from aegis.notify.models import Notice
 from aegis.notify.channels import channel_from_env
 from aegis.notify.outbox import Channel, outbox, send_due
+from aegis.notify.summary import (
+    already_summarized,
+    build_summary,
+    new_york_day,
+    read_log_lines,
+    summary_event,
+)
 from aegis.store.db import open_store
 from aegis.store.errors import StoreError
 from aegis.store.models import EventLevel
+from aegis.store.repo import log_event
 
 ChannelFactory = Callable[[NotifyConfig], Channel]
+AccountReader = Callable[[], AccountState]
 
 NO_EVENTS = "there are no events in it"
 TEST_EVENT_ID = "test"
@@ -126,6 +144,58 @@ def _test(config: AegisConfig, factory: ChannelFactory, now: datetime) -> int:
     return 0
 
 
+def _read_account(reader: AccountReader | None) -> tuple[AccountState | None, str | None]:
+    """The account state, or None and why not: the summary goes out without it."""
+    if reader is None:
+        from aegis.data.account import get_account_state  # the broker client loads only here
+
+        reader = get_account_state
+    try:
+        return reader(), None
+    except Exception as exc:  # any failure, named by type only: the text goes to a phone
+        return None, type(exc).__name__
+
+
+def _summary(
+    args: argparse.Namespace,
+    db_path: Path,
+    config: AegisConfig,
+    now: datetime,
+    account_reader: AccountReader | None,
+) -> int:
+    day = args.day if args.day is not None else new_york_day(now)
+    if args.dry_run:
+        conn = _open_unchanged(db_path, NO_EVENTS)
+    else:
+        _require_file(db_path, NO_EVENTS)
+        _require_schema(db_path)
+        conn = open_store(db_path)
+    try:
+        if not args.dry_run and already_summarized(conn, day):
+            print(f"the summary for {day.isoformat()} was already written")
+            return 0
+        account, error = _read_account(account_reader)
+        log_lines = read_log_lines(Path(args.logs).expanduser(), day) if args.logs else None
+        summary = build_summary(
+            conn, day, config, now=now, account=account, account_error=error, log_lines=log_lines
+        )
+        if not args.dry_run:
+            log_event(conn, summary_event(summary, now))
+    finally:
+        conn.close()
+    print(summary.text)
+    if not args.dry_run:
+        print("written as a daily_summary event; the next `notify send` delivers it")
+    return 0
+
+
+def _day(text: str) -> date:
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a date (YYYY-MM-DD): {text!r}") from None
+
+
 def _parser() -> _Parser:
     parser = _Parser(
         prog="python -m aegis.cli.notify",
@@ -139,6 +209,13 @@ def _parser() -> _Parser:
         ("send", "push every notice due now and record each attempt"),
     ):
         commands.add_parser(name, parents=[common], help=help_text, description=help_text)
+    summary_help = "write the end-of-day summary for the next send (once a day)"
+    summary = commands.add_parser(
+        "summary", parents=[common], help=summary_help, description=summary_help
+    )
+    summary.add_argument("--day", type=_day, help="the New York day (default: today)")
+    summary.add_argument("--logs", help="the launchd log folder to read step exit codes from")
+    summary.add_argument("--dry-run", action="store_true", help="print the text, write nothing")
     test_help = "push one test notice (no database needed)"
     commands.add_parser("test", help=test_help, description=test_help)
     return parser
@@ -149,6 +226,7 @@ def main(
     *,
     channel_factory: ChannelFactory | None = None,
     clock: Callable[[], datetime] | None = None,
+    account_reader: AccountReader | None = None,
 ) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="backslashreplace")
@@ -165,6 +243,8 @@ def main(
         if args.command == "test":
             return _test(config, factory, now_of())
         db_path = _db_path(args.db)
+        if args.command == "summary":
+            return _summary(args, db_path, config, now_of(), account_reader)
         if args.command == "pending":
             return _pending(db_path, config, config.notify.channel, now_of())
         return _send(db_path, config, factory, now_of)

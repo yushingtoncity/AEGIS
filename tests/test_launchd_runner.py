@@ -171,6 +171,21 @@ def test_after_the_close_the_tick_only_syncs_and_notifies(box: Path) -> None:
     assert calls(box) == ["aegis.cli.orders sync", "aegis.cli.notify send"]
 
 
+@pytest.mark.parametrize("ny_clock", ["2 1620", "2 1627"])
+def test_from_16_20_the_tick_also_writes_the_days_summary_before_sending(box: Path, ny_clock: str) -> None:
+    run(box, "tick", market="closed", ny_clock=ny_clock)
+    assert calls(box) == [
+        "aegis.cli.orders sync",
+        f"aegis.cli.notify summary --logs {box / 'logs'}",
+        "aegis.cli.notify send",
+    ]
+
+
+def test_an_open_market_never_writes_the_summary(box: Path) -> None:
+    run(box, "tick", market="open", ny_clock="2 1622")  # the clock is late or the session ran long
+    assert calls(box) == ["aegis.cli.orders tick", "aegis.cli.notify send"]
+
+
 def test_a_closed_market_before_four_runs_nothing(box: Path) -> None:
     run(box, "tick", market="closed", ny_clock="4 1330")  # a holiday or an early close
     assert calls(box) == []

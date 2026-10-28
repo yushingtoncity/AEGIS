@@ -211,11 +211,14 @@ notify:
     - approval_answered          # the record of your yes or no
     - order_submitted            # an order reached the broker
     - order_updated              # the broker moved an order on: fills, cancels
+    - daily_summary              # the end-of-day summary `notify summary` writes after the close (one a day)
   ignore_kinds:                  # never these, whatever their level
     - policy_reject              # the gate turning a proposal down is the system working; a push every brain cycle would bury the ones that matter (`python -m aegis.cli.trace` shows them)
   lookback_minutes: 60           # events older than this are never sent: a first run (or one after a long outage) does not replay history
   max_attempts: 3                # a notice that failed this many times is given up on (each failure is a notify_failed event)
   max_per_run: 20                # at most this many pushes per run, oldest first; the rest wait for the next run (a run can take max_per_run x timeout_seconds = 200 s at worst, so from cron run it every 5 minutes or slower: two runs at once can push the same notice twice)
+  summary:
+    expected_cycles: 4           # brain cycles the launchd schedule fires on a trading day (ops/launchd/local.aegis.cycle.plist); fewer is reported as a problem
 
 # Read-only proposal scorecard (python -m aegis.cli.scorecard). Grades past
 # proposals by what the underlying did afterwards, so models (and, later, new
