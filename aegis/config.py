@@ -335,6 +335,19 @@ class BrokerConfig(BaseModel):
     not_found_grace_seconds: float = Field(default=120.0, ge=0)
 
 
+class NotifySummaryConfig(BaseModel):
+    """The end-of-day summary (``notify summary``, run by the after-close tick).
+
+    ``expected_cycles`` is how many brain cycles the launchd schedule fires
+    on a trading day; a day with fewer is reported as a problem. It only
+    shapes the report, never what may be traded.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    expected_cycles: int = Field(default=4, ge=1)
+
+
 class NotifyConfig(BaseModel):
     """Phase 7: telling the operator what happened, from the store's events.
 
@@ -359,11 +372,13 @@ class NotifyConfig(BaseModel):
         "approval_answered",
         "order_submitted",
         "order_updated",
+        "daily_summary",
     )
     ignore_kinds: tuple[str, ...] = ("policy_reject",)
     lookback_minutes: float = Field(default=60.0, gt=0)
     max_attempts: int = Field(default=3, ge=1)
     max_per_run: int = Field(default=20, ge=1)
+    summary: NotifySummaryConfig = Field(default_factory=NotifySummaryConfig)
 
     @field_validator("kinds", "ignore_kinds")
     @classmethod

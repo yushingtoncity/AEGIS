@@ -4,7 +4,8 @@
 #
 #   aegis-run.sh cycle   market open: brain once, judge its proposal, tick, notify;
 #                        the 15:00 cycle then makes the day's forecasts
-#   aegis-run.sh tick    market open: tick, notify; close to 16:30 ET: sync, notify
+#   aegis-run.sh tick    market open: tick, notify; close to 16:30 ET: sync, notify;
+#                        from 16:20 ET it also writes the day's summary text first
 #
 # Only existing CLI commands run here: the policy engine still judges every
 # proposal and `orders tick` is still the only thing that places. The market
@@ -26,6 +27,7 @@ TICK_WINDOW_START=925         # the tick asks the market clock from 09:25 ET on 
 WRAP_UP_END=1630              # ...to 16:30 ET: after the close it syncs and notifies, placing nothing
 FORECAST_FROM=1500            # a cycle from 15:00 ET until the close also runs `forecasts run` (once a day:
 FORECAST_UNTIL=1600           # it skips an arm that already ran today, and refuses while forecast.enabled is false)
+SUMMARY_FROM=1620             # an after-close tick from 16:20 ET writes the end-of-day summary (once a day: the later ticks find it written)
 
 MODE="${1:-}"
 case "$MODE" in
@@ -130,6 +132,9 @@ run_tick() {
     step aegis.cli.notify send
   elif [ "$state" = closed ] && [ "$NY_HHMM" -ge 1600 ]; then
     step aegis.cli.orders sync
+    if [ "$NY_HHMM" -ge "$SUMMARY_FROM" ]; then
+      step aegis.cli.notify summary --logs "$LOG_DIR"
+    fi
     step aegis.cli.notify send
   elif [ "$state" = unknown ]; then
     log "skipped: market clock unreadable"

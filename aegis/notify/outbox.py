@@ -74,7 +74,11 @@ _TITLES: dict[str, str] = {
     "risk_limit_tripped": "Daily loss limit tripped",
     "kill_switch": "Kill switch",
     "stand_down": "Stand-down",
+    "daily_summary": "Day summary",
 }
+_MULTILINE_KINDS = frozenset({"daily_summary"})
+"""Kinds whose message is laid out in lines (``aegis.notify.summary``): each
+line is cleaned on its own and the breaks are kept, so a phone shows a list."""
 _NEEDS_APPROVAL = "policy_needs_approval"
 _APPROVE_HINT = "Approve: python -m aegis.cli.orders approve {decision_id} --by NAME"
 _DECISION_ID_MAX = 64
@@ -131,7 +135,11 @@ def _title(event: Event) -> str:
 
 
 def _body(event: Event) -> str:
-    message = _one_line(event.message) or event.kind
+    if event.kind in _MULTILINE_KINDS:
+        lines = [_one_line(line) for line in str(event.message).splitlines()]
+        message = "\n".join(line for line in lines if line) or event.kind
+    else:
+        message = _one_line(event.message) or event.kind
     hint = ""
     decision_id = (event.payload or {}).get("decision_id")
     if (event.kind == _NEEDS_APPROVAL and isinstance(decision_id, str)

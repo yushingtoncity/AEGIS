@@ -10,7 +10,7 @@ always, whether anything is sent at all.
 | Job | When | What |
 |---|---|---|
 | `local.aegis.cycle` | weekdays 10:00, 11:30, 13:30, 15:00 local (New York) time | market check, `brain once`, `policy evaluate <the id it printed>`, `orders tick`, `notify send`. The 15:00 cycle then runs `forecasts run` (the day's per-ticker forecasts) |
-| `local.aegis.tick` | every 5 minutes, but only acts 09:25 to 16:30 ET on weekdays | market open: `orders tick`, `notify send`. Close to 16:30: `orders sync`, `notify send` (places nothing) |
+| `local.aegis.tick` | every 5 minutes, but only acts 09:25 to 16:30 ET on weekdays | market open: `orders tick`, `notify send`. Close to 16:30: `orders sync`, `notify send` (places nothing). From 16:20 it also runs `notify summary` before `notify send`: the end-of-day text |
 
 Both jobs call `aegis-run.sh` with this checkout's `.venv/bin/python`. The
 following rules apply:
@@ -29,6 +29,14 @@ following rules apply:
   after the trading steps, so it never delays them. It makes one run per arm
   per day (a repeat skips), refuses while `forecast.enabled` is false (logged
   as `exit 1`), and nothing that trades reads what it writes.
+- **Day summary:** the first tick after 16:20 writes one text about the day (cycles and
+  their outcomes, verdicts, approvals and orders, equity and positions, the
+  forecasts, the estimated Claude cost, and any problems, including a step
+  that logged a non-zero exit in `cycle.log` or `tick.log`), and the
+  `notify send` after it delivers it. A later tick finds it already
+  written. On a holiday, when every cycle found the market closed, the text
+  says only that. `python -m aegis.cli.notify summary --dry-run --logs
+  ~/Library/Logs/AEGIS` prints today's text without writing it.
 - **Logs:** they go to `~/Library/Logs/AEGIS/cycle.log` and `tick.log`. A log
   rolls over at 10 MB, keeping one old copy. The store stays the record, and
   `python -m aegis.cli.trace` shows it.
