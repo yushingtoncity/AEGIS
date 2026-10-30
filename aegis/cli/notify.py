@@ -4,6 +4,10 @@ Run:  python -m aegis.cli.notify pending [--db PATH]
       python -m aegis.cli.notify send [--db PATH]
       python -m aegis.cli.notify test
       python -m aegis.cli.notify summary [--db PATH] [--day YYYY-MM-DD] [--logs DIR] [--dry-run]
+      python -m aegis.cli.notify feed-pending [--db PATH]
+      python -m aegis.cli.notify feed-send [--db PATH]
+      python -m aegis.cli.notify feed-test
+      python -m aegis.cli.notify feed-recap [--db PATH] [--day YYYY-MM-DD] [--dry-run]
 
 ``pending`` lists the notices a ``send`` would push now (the events at or
 above ``notify.min_level`` or of a kind in ``notify.kinds``, younger than
@@ -34,8 +38,19 @@ an exit 1) and, with ``--logs``, the launchd logs in that folder.
 ``--dry-run`` prints the text and writes nothing. It works with
 ``notify.enabled`` off: only ``send`` pushes anything.
 
-``main(argv, *, channel_factory=None, clock=None, account_reader=None)``: tests inject a stand-in
-channel and a fixed clock.
+The ``feed-*`` commands are the friends' feed (``aegis.notify.feed``), a
+one-way Discord channel with its own ``feed:`` block in config.yaml and
+``DISCORD_WEBHOOK_URL`` in .env. ``feed-pending`` prints, in full, every
+post a ``feed-send`` would make now, so what friends would read can be
+checked before the feed is turned on; it writes nothing. ``feed-send``
+posts them and needs ``feed.enabled: true``. ``feed-test`` posts one fixed
+message and touches no database. ``feed-recap`` writes the day's
+``feed_recap`` event (at most one per New York day) for the next
+``feed-send``; like ``summary`` it reads the paper account once and keeps
+only the day's change.
+
+``main(argv, *, channel_factory=None, feed_channel_factory=None, clock=None, account_reader=None)``:
+tests inject stand-in channels and a fixed clock.
 """
 
 from __future__ import annotations
@@ -59,11 +74,13 @@ from aegis.cli.policy import (
     _ts,
     _UsageError,
 )
-from aegis.config import AegisConfig, ConfigError, NotifyConfig, get_config
+from aegis.config import AegisConfig, ConfigError, FeedConfig, NotifyConfig, get_config
 from aegis.data.models import AccountState, utcnow
 from aegis.notify.errors import NotifyError
 from aegis.notify.models import Notice
+from aegis.notify import discord
 from aegis.notify.channels import channel_from_env
+from aegis.notify.feed import already_recapped, feed_outbox, recap_event, send_feed
 from aegis.notify.outbox import Channel, outbox, send_due
 from aegis.notify.summary import (
     already_summarized,
@@ -78,12 +95,15 @@ from aegis.store.models import EventLevel
 from aegis.store.repo import log_event
 
 ChannelFactory = Callable[[NotifyConfig], Channel]
+FeedChannelFactory = Callable[[FeedConfig], Channel]
 AccountReader = Callable[[], AccountState]
 
 NO_EVENTS = "there are no events in it"
 TEST_EVENT_ID = "test"
 TEST_TITLE = "AEGIS test"
 TEST_BODY = "The notifier can reach you. Nothing happened in AEGIS; this is a test."
+FEED_TEST_TITLE = "AEGIS feed test"
+FEED_TEST_BODY = "The AEGIS feed can reach this channel. Nothing happened; this is a test."
 
 
 def _notice_line(notice: Notice) -> str:
@@ -141,6 +161,89 @@ def _test(config: AegisConfig, factory: ChannelFactory, now: datetime) -> int:
         title=TEST_TITLE, body=TEST_BODY, priority=3, tags=("white_check_mark",),
     ))
     print(f"test notice sent on {channel.name}")
+    return 0
+
+
+def _feed_pending(db_path: Path, config: AegisConfig, now: datetime) -> int:
+    conn = _open_unchanged(db_path, NO_EVENTS)
+    try:
+        due = feed_outbox(conn, config.feed, discord.CHANNEL_NAME, now)
+    finally:
+        conn.close()
+    print(f"due now ({len(due.posts)})")
+    if not due.posts:
+        print(f"{INDENT}(none)")
+    for post in due.posts:  # in full: this is what friends would read
+        print(f"{INDENT}{_clean(post.key)}")
+        print(discord.content_for(post.notice))
+    if due.waiting:
+        print(f"{due.waiting} more wait for the next run (feed.max_per_run is {config.feed.max_per_run})")
+    if due.given_up:
+        print(f"{due.given_up} given up after {config.feed.max_attempts} failed attempts")
+    if not config.feed.enabled:
+        print("note: feed.enabled is false in config.yaml: posting is off")
+    return 0
+
+
+def _feed_send(
+    db_path: Path, config: AegisConfig, factory: FeedChannelFactory, clock: Callable[[], datetime]
+) -> int:
+    if not config.feed.enabled:
+        raise _Failure("feed.enabled is false in config.yaml: nothing is posted")
+    channel = factory(config.feed)
+    _require_file(db_path, NO_EVENTS)
+    _require_schema(db_path)
+    conn = open_store(db_path)
+    try:
+        report = send_feed(conn, config.feed, channel, clock)
+    finally:
+        conn.close()
+    for line in report.lines or ("nothing to post",):
+        print(_clean(line))
+    if report.waiting:
+        print(f"{report.waiting} more wait for the next run")
+    if report.failed:
+        print(f"{report.failed} not posted", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _feed_test(config: AegisConfig, factory: FeedChannelFactory, now: datetime) -> int:
+    channel = factory(config.feed)
+    channel.send(Notice(
+        event_id=TEST_EVENT_ID, occurred_at=now, level=EventLevel.INFO, kind="notify_test",
+        title=FEED_TEST_TITLE, body=FEED_TEST_BODY,
+    ))
+    print(f"test post sent on {channel.name}")
+    return 0
+
+
+def _feed_recap(
+    args: argparse.Namespace,
+    db_path: Path,
+    now: datetime,
+    account_reader: AccountReader | None,
+) -> int:
+    day = args.day if args.day is not None else new_york_day(now)
+    if args.dry_run:
+        conn = _open_unchanged(db_path, NO_EVENTS)
+    else:
+        _require_file(db_path, NO_EVENTS)
+        _require_schema(db_path)
+        conn = open_store(db_path)
+    try:
+        if not args.dry_run and already_recapped(conn, day):
+            print(f"the feed recap for {day.isoformat()} was already written")
+            return 0
+        account, _ = _read_account(account_reader)  # a failed read: the recap says "not available"
+        event = recap_event(conn, day, account, now)
+        if not args.dry_run:
+            log_event(conn, event)
+    finally:
+        conn.close()
+    print(_clean(event.message))
+    if not args.dry_run:
+        print("written as a feed_recap event; the next `notify feed-send` posts it")
     return 0
 
 
@@ -218,6 +321,19 @@ def _parser() -> _Parser:
     summary.add_argument("--dry-run", action="store_true", help="print the text, write nothing")
     test_help = "push one test notice (no database needed)"
     commands.add_parser("test", help=test_help, description=test_help)
+    for name, help_text in (
+        ("feed-pending", "print every post a feed-send would make now; write nothing"),
+        ("feed-send", "post everything due to the friends' feed and record each attempt"),
+    ):
+        commands.add_parser(name, parents=[common], help=help_text, description=help_text)
+    recap_help = "write the day's recap for the next feed-send (once a day)"
+    recap = commands.add_parser(
+        "feed-recap", parents=[common], help=recap_help, description=recap_help
+    )
+    recap.add_argument("--day", type=_day, help="the New York day (default: today)")
+    recap.add_argument("--dry-run", action="store_true", help="print the recap, write nothing")
+    feed_test_help = "post one test message to the friends' feed (no database needed)"
+    commands.add_parser("feed-test", help=feed_test_help, description=feed_test_help)
     return parser
 
 
@@ -225,6 +341,7 @@ def main(
     argv: list[str] | None = None,
     *,
     channel_factory: ChannelFactory | None = None,
+    feed_channel_factory: FeedChannelFactory | None = None,
     clock: Callable[[], datetime] | None = None,
     account_reader: AccountReader | None = None,
 ) -> int:
@@ -238,11 +355,22 @@ def main(
 
     now_of = clock if clock is not None else utcnow
     factory: ChannelFactory = channel_factory if channel_factory is not None else channel_from_env
+    feed_factory: FeedChannelFactory = (
+        feed_channel_factory if feed_channel_factory is not None else discord.from_env
+    )
     try:
         config = get_config()
         if args.command == "test":
             return _test(config, factory, now_of())
+        if args.command == "feed-test":
+            return _feed_test(config, feed_factory, now_of())
         db_path = _db_path(args.db)
+        if args.command == "feed-pending":
+            return _feed_pending(db_path, config, now_of())
+        if args.command == "feed-send":
+            return _feed_send(db_path, config, feed_factory, now_of)
+        if args.command == "feed-recap":
+            return _feed_recap(args, db_path, now_of(), account_reader)
         if args.command == "summary":
             return _summary(args, db_path, config, now_of(), account_reader)
         if args.command == "pending":

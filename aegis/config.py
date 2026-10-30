@@ -389,6 +389,34 @@ class NotifyConfig(BaseModel):
         return cleaned
 
 
+FeedPost = Literal["proposals", "fills", "recap"]
+
+
+class FeedConfig(BaseModel):
+    """The friends' feed: a one-way Discord channel showing what AEGIS does.
+
+    A second audience next to ``notify``, which is the operator's. It posts
+    proposals, fills and a once-a-day recap built from a short allowlist of
+    store fields, never from the operator's notices, so approval commands,
+    decision ids, account figures and errors never reach it. Quantities,
+    prices and dollar amounts appear only with ``show_amounts``. Shipped with
+    ``enabled: false``; the webhook URL lives in .env, never here. It reads
+    the trading tables and writes only its own ``notify_*`` events, so
+    nothing here changes what may be traded.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+
+    enabled: StrictBool = False
+    show_amounts: StrictBool = False
+    posts: tuple[FeedPost, ...] = ("proposals", "fills", "recap")
+    thesis_chars: int = Field(default=280, ge=0, le=1000)
+    timeout_seconds: float = Field(default=10.0, gt=0)
+    lookback_minutes: float = Field(default=60.0, gt=0)
+    max_attempts: int = Field(default=3, ge=1)
+    max_per_run: int = Field(default=10, ge=1)
+
+
 class ScorecardConfig(BaseModel):
     """How the read-only proposal scorecard grades past proposals.
 
@@ -501,6 +529,7 @@ class AegisConfig(BaseModel):
     risk_limits: RiskLimits = RiskLimits()
     broker: BrokerConfig = BrokerConfig()
     notify: NotifyConfig = NotifyConfig()
+    feed: FeedConfig = FeedConfig()
     scorecard: ScorecardConfig = ScorecardConfig()
     forecast: ForecastConfig = ForecastConfig()
 

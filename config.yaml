@@ -220,6 +220,28 @@ notify:
   summary:
     expected_cycles: 4           # brain cycles the launchd schedule fires on a trading day (ops/launchd/local.aegis.cycle.plist); fewer is reported as a problem
 
+# The friends' feed (aegis/notify/feed.py): a one-way Discord channel where
+# friends can watch what the paper account does. It is a second audience
+# next to notify (which is yours) and shares nothing with it: each post is
+# built from a short allowlist of store fields, so approval commands,
+# decision ids, account numbers, equity, errors and the kill switch never
+# reach it, and every post ends "Paper account. Not investment advice."
+# Nothing in Discord can talk back: there is no bot, only an incoming
+# webhook, and mentions are switched off. The webhook URL lives in .env as
+# DISCORD_WEBHOOK_URL, never here.
+feed:
+  enabled: false                 # off until DISCORD_WEBHOOK_URL is in .env on the mini and `notify feed-test` reached the server; `notify feed-send` refuses while false
+  show_amounts: false            # false: tickers, directions and the day's change in percent only. true adds share counts, prices and the day's change in dollars (never equity or positions)
+  posts:                         # what the feed posts
+    - proposals                  # a proposal the brain wrote: ticker, direction, confidence and a cut of the thesis (before the risk gate judges it)
+    - fills                      # an order the broker reports fully filled
+    - recap                      # the after-close recap `notify feed-recap` writes (one a day)
+  thesis_chars: 280              # characters of the model's thesis shown with a proposal; 0 leaves it out. About two lines in Discord
+  timeout_seconds: 10            # per post: one small POST; a stuck send must not hang a tick
+  lookback_minutes: 60           # events older than this are never posted: a first run (or one after an outage) does not replay history
+  max_attempts: 3                # a post that failed this many times is given up on (each failure is a notify_failed event)
+  max_per_run: 10                # at most this many posts per run, oldest first; Discord rate-limits webhooks (a refused post is retried next run), and a quiet feed is easier to read
+
 # Read-only proposal scorecard (python -m aegis.cli.scorecard). Grades past
 # proposals by what the underlying did afterwards, so models (and, later, new
 # news sources) can be compared on the same yardstick. It never writes to the
