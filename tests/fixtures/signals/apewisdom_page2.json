@@ -1,0 +1,8 @@
+{
+  "count": 203,
+  "pages": 3,
+  "current_page": 2,
+  "results": [
+    {"rank": 117, "ticker": "SPY", "name": "SPDR S&P 500 ETF Trust", "mentions": 41, "upvotes": 300, "rank_24h_ago": 98, "mentions_24h_ago": 55, "_note": "SPY ranks below the first page, which is why the source reads several"}
+  ]
+}

@@ -18,9 +18,11 @@ documented contract (``ScanBrief.staleness_warnings``), not model output.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from aegis.brain.llm import LLMClient
 from aegis.brain.models import MarketSnapshot, ScanBrief, ScanResult
-from aegis.brain.prompts import build_scan_prompt, prompt_version, system_prompt
+from aegis.brain.prompts import build_scan_prompt, scan_prompt_version, system_prompt
 from aegis.brain.stage import run_json_stage
 from aegis.config import BrainConfig
 from aegis.store.models import ReasoningStage
@@ -39,19 +41,22 @@ def run_scan(
     config: BrainConfig,
     *,
     cycle_id: str | None = None,
+    signals: Sequence[str] | None = None,
 ) -> ScanResult:
     """Run the scan stage with ``config.stages.scan`` and ``config.max_retries``.
 
     The returned brief always carries the snapshot's data-age warnings (see
     ``merge_staleness_warnings``); ``raw_output`` is the model's text as
-    validated, before the merge.
+    validated, before the merge. ``signals`` are signals-digest lines to show
+    inside the untrusted news block; with any, the recorded prompt version
+    gains ``+signals-v1``.
     """
     brief, usage, raw = run_json_stage(
         llm,
         stage=ReasoningStage.SCAN,
         stage_config=config.stages.scan,
         system=system_prompt(),
-        user_prompt=build_scan_prompt(snapshot),
+        user_prompt=build_scan_prompt(snapshot, signals),
         output_model=ScanBrief,
         max_retries=config.max_retries,
         cycle_id=cycle_id,
@@ -60,5 +65,5 @@ def run_scan(
         brief=merge_staleness_warnings(brief, snapshot),
         usage=usage,
         raw_output=raw,
-        prompt_version=prompt_version(ReasoningStage.SCAN),
+        prompt_version=scan_prompt_version(bool(signals)),
     )

@@ -59,6 +59,8 @@ TABLES: tuple[str, ...] = (
     "controls",
     "forecast_runs",
     "forecasts",
+    "signal_fetches",
+    "signals",
 )
 
 # One literal query per table: table names never come from user input and
@@ -77,6 +79,8 @@ _COUNT_QUERIES: dict[str, str] = {
     "controls": "SELECT COUNT(*) FROM controls",
     "forecast_runs": "SELECT COUNT(*) FROM forecast_runs",
     "forecasts": "SELECT COUNT(*) FROM forecasts",
+    "signal_fetches": "SELECT COUNT(*) FROM signal_fetches",
+    "signals": "SELECT COUNT(*) FROM signals",
 }
 
 _MIGRATION_FILE_RE = re.compile(r"^(\d{4})_([a-z0-9_]+)\.sql$")

@@ -487,6 +487,80 @@ class ForecastConfig(BaseModel):
         return self
 
 
+class SignalSourceConfig(BaseModel):
+    """One signal source's switch, prior and limits.
+
+    ``confidence`` is a PRIOR, not a measurement: neither source reports how
+    far its items can be trusted, so the operator states it here and the
+    ranking multiplies by it. Replace it with a measured hit rate once the
+    paper campaign has one. ``requests_per_minute`` / ``requests_per_day``
+    are the client-side limiter's caps; ``None`` means the provider states
+    no limit and the source is only bounded by ``fetch_interval_minutes``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+
+    enabled: StrictBool = False
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    per_subject: int = Field(default=10, ge=1, le=100)
+    timeout_seconds: float = Field(default=10, gt=0)
+    requests_per_minute: int | None = Field(default=None, ge=1)
+    requests_per_day: int | None = Field(default=None, ge=1)
+    pages: int = Field(default=1, ge=1, le=20)
+
+
+class SignalSources(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    news: SignalSourceConfig = SignalSourceConfig(enabled=True, confidence=0.6)
+    apewisdom: SignalSourceConfig = SignalSourceConfig(confidence=0.3, pages=3)
+
+
+class SignalsConfig(BaseModel):
+    """External news and social context for the scan stage (``aegis/signals``).
+
+    Context only, never a trading input: the digest is shown to the scan
+    model inside the untrusted-news block and nothing on the order path
+    reads it (``tests/test_signals_architecture.py``). Shipped off.
+
+    ``tickers`` empty means the trading watchlist. ``assignment`` decides
+    which cycles get signals: ``every_cycle``, or ``alternate_days`` (on
+    when the New York trading date's ordinal is even) so an on/off
+    comparison spans the same weeks instead of two different regimes.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+
+    enabled: StrictBool = False
+    assignment: Literal["every_cycle", "alternate_days"] = "every_cycle"
+    tickers: tuple[str, ...] = ()
+    topics: tuple[str, ...] = ()
+    fetch_interval_minutes: float = Field(default=30, gt=0)
+    half_life_hours: float = Field(default=6, gt=0)
+    max_age_hours: float = Field(default=48, gt=0)
+    min_weight: float = Field(default=0.05, ge=0.0, le=1.0)
+    max_items: int = Field(default=12, ge=1, le=100)
+    max_item_chars: int = Field(default=200, ge=40, le=2000)
+    max_prompt_tokens: int = Field(default=1500, ge=100)
+    sources: SignalSources = SignalSources()
+
+    @field_validator("tickers")
+    @classmethod
+    def _clean_tickers(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        cleaned = tuple(dict.fromkeys(s.strip().upper() for s in value))
+        if any(not s for s in cleaned):
+            raise ValueError("signals.tickers must not contain a blank symbol")
+        return cleaned
+
+    @field_validator("topics")
+    @classmethod
+    def _clean_topics(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        cleaned = tuple(dict.fromkeys(t.strip().lower() for t in value))
+        if any(not t for t in cleaned):
+            raise ValueError("signals.topics must not contain a blank topic")
+        return cleaned
+
+
 class AegisConfig(BaseModel):
     """The validated contents of config.yaml."""
 
@@ -503,6 +577,7 @@ class AegisConfig(BaseModel):
     notify: NotifyConfig = NotifyConfig()
     scorecard: ScorecardConfig = ScorecardConfig()
     forecast: ForecastConfig = ForecastConfig()
+    signals: SignalsConfig = SignalsConfig()
 
     @field_validator("watchlist")
     @classmethod
@@ -511,6 +586,26 @@ class AegisConfig(BaseModel):
         if not cleaned:
             raise ValueError("watchlist must contain at least one symbol")
         return cleaned
+
+    @model_validator(mode="after")
+    def _signals_fit_the_cycle_cap(self) -> "AegisConfig":
+        """The digest plus every stage's output cap must leave room under
+        ``brain.per_cycle_token_cap`` for the prompts themselves; the budget
+        guard still has the last word on every call."""
+        stages = self.brain.stages
+        reserved = (
+            self.signals.max_prompt_tokens
+            + stages.scan.max_tokens
+            + stages.thesis.max_tokens
+            + stages.proposal.max_tokens
+        )
+        if self.signals.enabled and reserved >= self.brain.per_cycle_token_cap:
+            raise ValueError(
+                f"signals.max_prompt_tokens ({self.signals.max_prompt_tokens}) plus the stages'"
+                f" max_tokens ({reserved - self.signals.max_prompt_tokens}) must stay under"
+                f" brain.per_cycle_token_cap ({self.brain.per_cycle_token_cap})"
+            )
+        return self
 
 
 def load_config(path: str | Path | None = None) -> AegisConfig:

@@ -1,0 +1,12 @@
+{
+  "count": 203,
+  "pages": 3,
+  "current_page": 1,
+  "results": [
+    {"rank": 1, "ticker": "NVDA", "name": "NVIDIA Corp", "mentions": 812, "upvotes": 9450, "rank_24h_ago": 2, "mentions_24h_ago": 540},
+    {"rank": 2, "ticker": "TSLA", "name": "Tesla Inc", "mentions": 640, "upvotes": 7012, "rank_24h_ago": 1, "mentions_24h_ago": 702},
+    {"rank": 3, "ticker": "AAPL", "name": "Apple Inc", "mentions": "233", "upvotes": "1804", "rank_24h_ago": "5", "mentions_24h_ago": "190"},
+    {"rank": 4, "ticker": "", "name": "malformed: no ticker", "mentions": 99, "upvotes": 1},
+    {"rank": 5, "ticker": "MSFT", "name": "malformed: no mention count", "upvotes": 4}
+  ]
+}

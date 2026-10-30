@@ -480,10 +480,41 @@ def _news_block(symbols: Sequence[SymbolSnapshot]) -> str:
     return "\n".join(lines) or "(no headlines)"
 
 
-def build_scan_prompt(snapshot: MarketSnapshot) -> str:
+SIGNALS_PROMPT_VERSION = "signals-v1"
+"""Appended to the scan stage's prompt version when a digest was shown, so
+the audit trail and the scorecard can tell the two arms apart."""
+SIGNALS_HEADER = (
+    "signals digest (external, unverified; ranked by recency, a per-source prior and attention; "
+    "sentiment runs -1 to +1, and unscored means the source gives none):"
+)
+
+
+def scan_prompt_version(with_signals: bool) -> str:
+    """The scan stage's recorded version: ``prompt_version(SCAN)``, plus
+    ``+signals-v1`` when the prompt carried a signals digest."""
+    base = prompt_version(ReasoningStage.SCAN)
+    return f"{base}+{SIGNALS_PROMPT_VERSION}" if with_signals else base
+
+
+def _signals_block(lines: Sequence[str]) -> str:
+    """The digest, inside the news block: one neutralised line per signal.
+    The lines were already stripped of links and markup (``aegis.signals``);
+    neutralising again here is what keeps the delimiters unforgeable."""
+    body = [f"- {neutralise_untrusted(line.removeprefix('- '))}" for line in lines]
+    return "\n".join([SIGNALS_HEADER, *body])
+
+
+def build_scan_prompt(snapshot: MarketSnapshot, signals: Sequence[str] | None = None) -> str:
     """The scan stage's user message: data age first, then the account, one
     block per symbol (spot, bars, chain table), the delimited news block and
-    the task."""
+    the task.
+
+    ``signals`` are digest lines (``aegis.signals``); when there are any they
+    are appended inside the news block, after the headlines. With none the
+    prompt is byte for byte the one without the signals module."""
+    news = _news_block(snapshot.symbols)
+    if signals:
+        news = f"{news}\n\n{_signals_block(signals)}"
     return load_template("scan").render(
         taken_at=_ts(snapshot.taken_at),
         risk_free_rate=_pct(snapshot.risk_free_rate),
@@ -492,7 +523,7 @@ def build_scan_prompt(snapshot: MarketSnapshot) -> str:
         symbols="\n\n".join(_symbol_block(s) for s in snapshot.symbols) or "(no symbols)",
         guard=INJECTION_GUARD,
         news_open=NEWS_DELIM_OPEN,
-        news=_news_block(snapshot.symbols),
+        news=news,
         news_close=NEWS_DELIM_CLOSE,
     )
 
@@ -885,6 +916,9 @@ __all__ = [
     "build_forecast_prompt",
     "build_proposal_prompt",
     "build_scan_prompt",
+    "scan_prompt_version",
+    "SIGNALS_HEADER",
+    "SIGNALS_PROMPT_VERSION",
     "build_thesis_prompt",
     "chain_strikes",
     "load_template",

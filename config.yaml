@@ -304,3 +304,48 @@ forecast:
     baseline_lookback_sessions: 250   # about a trading year of past outcomes behind each base-rate and signal baseline
     baseline_min_samples: 100         # fewer past outcomes than this and a baseline says 0.5 rather than guess from noise
     bootstrap_samples: 2000           # resamples of whole dates for each interval; Monte Carlo error well under the interval's width
+
+# Signals (aegis/signals): a short, ranked digest of recent news headlines and
+# Reddit mention counts about the watched tickers, shown to the SCAN stage
+# only, inside the same untrusted-news block as the headlines. Context, never
+# authority: nothing on the order path reads it, so no risk limit, the
+# no-trade list or the kill switch can be changed by it. Off until you turn it
+# on, on the mini. Both sources are free and need no new key.
+signals:
+  enabled: false
+  # every_cycle, or alternate_days: on when the New York trading date's
+  # ordinal is even, so signals-on and signals-off cycles share the same weeks
+  # and the scorecard compares like with like.
+  assignment: every_cycle
+  tickers: []                    # empty = the watchlist above
+  topics: []                     # keywords matched against market-wide headlines, e.g. "semiconductor"
+  # A successful fetch newer than this is reused instead of repeated. 30
+  # matches brain.cadence_minutes; with launchd's 4 cycles a day every cycle
+  # fetches fresh, and a manual rerun inside 30 minutes costs no request.
+  fetch_interval_minutes: 30
+  # Recency decay: weight = confidence x 0.5^(age / half_life_hours).
+  # PLACEHOLDER: 6 hours means a pre-open headline counts about half by the
+  # 1:30 pm cycle and a day-old one an eighth; tune once there is data.
+  half_life_hours: 6
+  max_age_hours: 48              # never shown past this, faded or not
+  min_weight: 0.05               # dropped when confidence x decay falls below this (0.6 news prior: about 21 hours)
+  max_items: 12                  # lines in the digest, best ranked first
+  max_item_chars: 200            # each item's text is cut here, after links and markup are stripped
+  # Token cap for the digest, estimated at 4 characters a token like the
+  # budget guard. 1,500 on the Haiku scan stage is about $0.0002 a cycle. The
+  # config refuses a cap that, with the stages' max_tokens, would reach
+  # brain.per_cycle_token_cap; the budget guard still checks every call.
+  max_prompt_tokens: 1500
+  sources:
+    news:                        # Alpaca News (Benzinga): free with the existing paper keys; scores no sentiment
+      enabled: true
+      confidence: 0.6            # PRIOR, not measured: a dated, sourced headline about the ticker itself
+      per_subject: 10            # headlines read per ticker or topic
+      timeout_seconds: 10        # unused by alpaca-py today; kept so every source states one
+    apewisdom:                   # https://apewisdom.io/api/ Reddit mention counts: free, no key, no stated limits or SLA
+      enabled: false             # off even with signals on until you have checked the first live call on the mini
+      confidence: 0.3            # PRIOR: attention is not direction; a mention spike says people are talking, not which way
+      per_subject: 1             # one count per ticker per fetch
+      timeout_seconds: 10
+      pages: 3                   # 100 tickers a page; SPY and QQQ can rank below the first page
+      requests_per_minute: 5     # politeness cap: the provider states none, and one cycle needs at most `pages`
