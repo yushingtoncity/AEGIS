@@ -223,7 +223,7 @@ class TestMigration:
             "INSERT INTO fills (id, order_id, filled_at, fill_price, fill_quantity, fees)"
             " VALUES ('fill-old', 'legacy-1', ?, 0, 1, 0)", (NOW.isoformat(),),  # a zero price, once allowed
         )
-        assert migrate(conn) == 5  # 0004, then every later migration
+        assert migrate(conn) == len(list_migrations())  # 0004, then every later migration
         trace = get_proposal_trace(conn, "prop-0001")
         assert trace.decisions[0].purpose is DecisionPurpose.EVALUATE
         assert trace.approvals[0].decision_id is None and trace.approvals[0].expires_at is None

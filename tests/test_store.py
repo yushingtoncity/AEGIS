@@ -30,6 +30,7 @@ from aegis.cli import db as cli_db
 from aegis.cli import trace as cli_trace
 from aegis.config import REPO_ROOT, get_config
 from aegis.data.models import OptionType
+from aegis.data.signals import SignalKind, SignalSource
 from aegis.store import db as store_db
 from aegis.store import models as store_models
 from aegis.store import repo
@@ -75,6 +76,9 @@ from aegis.store.models import (
     ProposalTrace,
     Reasoning,
     ReasoningStage,
+    SignalFetch,
+    SignalFetchStatus,
+    SignalRecord,
     StoreStatus,
     TokenUsage,
     Verdict,
@@ -110,11 +114,12 @@ from aegis.store.repo import (
     snapshot_positions,
     upsert_order,
 )
+from aegis.store.signals import record_fetch
 
 NAIVE = datetime(2026, 7, 30, 14, 0, 0)
 AWARE = NAIVE.replace(tzinfo=timezone.utc)
-LATEST = 5
-"""The newest migration: 0005_forecasts (per-ticker forecasts)."""
+LATEST = 6
+"""The newest migration: 0006_signals (news and social signals for the scan stage)."""
 
 
 @pytest.fixture
@@ -206,13 +211,15 @@ _COUNT_SQL = {
     "controls": "SELECT COUNT(*) FROM controls",
     "forecast_runs": "SELECT COUNT(*) FROM forecast_runs",
     "forecasts": "SELECT COUNT(*) FROM forecasts",
+    "signal_fetches": "SELECT COUNT(*) FROM signal_fetches",
+    "signals": "SELECT COUNT(*) FROM signals",
 }
 
 # A freshly migrated store holds nothing but the two rows 0003 seeds in ``controls``.
 _FRESH_COUNTS = {
     "proposals": 0, "proposal_legs": 0, "reasoning": 0, "policy_decisions": 0, "approvals": 0, "orders": 0,
     "fills": 0, "position_snapshots": 0, "pnl_snapshots": 0, "events": 0, "controls": 2,
-    "forecast_runs": 0, "forecasts": 0,
+    "forecast_runs": 0, "forecasts": 0, "signal_fetches": 0, "signals": 0,
 }
 
 
@@ -356,7 +363,9 @@ class TestConnect:
         assert conn.execute("PRAGMA synchronous").fetchone()[0] == 1  # NORMAL, the WAL pairing
         assert schema_version(conn) == LATEST
         assert _table_names(conn) == set(TABLES) | {"schema_version"}
-        assert len(TABLES) == 13 and TABLES[-3:] == ("controls", "forecast_runs", "forecasts")
+        assert len(TABLES) == 15 and TABLES[-5:] == (
+            "controls", "forecast_runs", "forecasts", "signal_fetches", "signals"
+        )
         assert conn.row_factory is sqlite3.Row
         assert conn.isolation_level is None
 
@@ -441,7 +450,7 @@ class TestConnect:
         assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert [row[:3] for row in _schema_rows(conn)] == [  # migrated once
             (1, 1, "0001_initial"), (2, 2, "0002_reasoning_cycles_and_legs"), (3, 3, "0003_controls"), (4, 4, "0004_execution"),
-            (5, 5, "0005_forecasts"),
+            (5, 5, "0005_forecasts"), (6, 6, "0006_signals"),
         ]
         assert _count(conn, "events") == 40
         conn.close()
@@ -492,6 +501,7 @@ class TestMigrations:
             (3, "0003_controls", "0003_controls.sql"),
             (4, "0004_execution", "0004_execution.sql"),
             (5, "0005_forecasts", "0005_forecasts.sql"),
+            (6, "0006_signals", "0006_signals.sql"),
         ]
         assert all(path.parent == MIGRATIONS_DIR for _, _, path in list_migrations())
 
@@ -529,7 +539,7 @@ class TestMigrations:
         assert migrate(conn) == LATEST
         assert _schema_rows(conn) == before  # the same rows, byte for byte: nothing re-applied
         assert applied_versions(conn) == {
-            1: "0001_initial", 2: "0002_reasoning_cycles_and_legs", 3: "0003_controls", 4: "0004_execution", 5: "0005_forecasts",
+            1: "0001_initial", 2: "0002_reasoning_cycles_and_legs", 3: "0003_controls", 4: "0004_execution", 5: "0005_forecasts", 6: "0006_signals",
         }
         for (applied_at,) in conn.execute("SELECT applied_at FROM schema_version").fetchall():
             assert datetime.fromisoformat(applied_at).tzinfo is not None
@@ -707,7 +717,7 @@ class TestMigrations:
         assert migrate(conn) == LATEST  # 0002, and 0003 and 0004 after it
         assert not conn.in_transaction
         assert applied_versions(conn) == {
-            1: "0001_initial", 2: "0002_reasoning_cycles_and_legs", 3: "0003_controls", 4: "0004_execution", 5: "0005_forecasts",
+            1: "0001_initial", 2: "0002_reasoning_cycles_and_legs", 3: "0003_controls", 4: "0004_execution", 5: "0005_forecasts", 6: "0006_signals",
         }
         assert _table_names(conn) == set(TABLES) | {"schema_version"}  # reasoning_v2 is gone, proposal_legs is there
         rows = conn.execute(
@@ -846,7 +856,7 @@ class TestMigrations:
         for version, name, path in list_migrations()[:2]:
             store_db._apply_migration(conn, version, name, path)
         assert schema_version(conn) == 2 and "controls" not in _table_names(conn)
-        assert status(conn, db_path).pending_migrations == ("0003_controls", "0004_execution", "0005_forecasts")
+        assert status(conn, db_path).pending_migrations == ("0003_controls", "0004_execution", "0005_forecasts", "0006_signals")
         with pytest.raises(StoreError, match="get controls") as info:  # nothing to read before 0003
             get_controls(conn)
         assert "no such table: controls" in str(info.value)
@@ -867,7 +877,7 @@ class TestMigrations:
         assert migrate(conn) == LATEST  # 0003, then 0004
         assert not conn.in_transaction
         assert applied_versions(conn) == {
-            1: "0001_initial", 2: "0002_reasoning_cycles_and_legs", 3: "0003_controls", 4: "0004_execution", 5: "0005_forecasts",
+            1: "0001_initial", 2: "0002_reasoning_cycles_and_legs", 3: "0003_controls", 4: "0004_execution", 5: "0005_forecasts", 6: "0006_signals",
         }
         assert _schema_rows(conn)[:2] == schema_before  # 0001 and 0002 were not re-applied
         assert _table_names(conn) == set(TABLES) | {"schema_version"}
@@ -955,7 +965,9 @@ class TestSchemaConstraints:
             ("policy_decisions", "verdict"): Verdict, ("approvals", "response"): ApprovalResponse,
             ("orders", "broker"): Broker, ("orders", "status"): OrderStatus, ("orders", "side"): OrderSide,
             ("events", "level"): EventLevel, ("forecast_runs", "arm"): ForecastArm,
-            ("forecasts", "event"): ForecastEvent,
+            ("forecasts", "event"): ForecastEvent, ("signal_fetches", "source"): SignalSource,
+            ("signal_fetches", "status"): SignalFetchStatus, ("signals", "source"): SignalSource,
+            ("signals", "kind"): SignalKind,
         }
         for (table, column), enum in enum_columns.items():
             ddl = conn.execute("SELECT sql FROM sqlite_master WHERE name = ?", (table,)).fetchone()[0]
@@ -1000,10 +1012,28 @@ class TestSchemaConstraints:
                                rationale="r")
                 for event in ForecastEvent
             ])
+        for status in SignalFetchStatus:
+            record_fetch(conn, SignalFetch(
+                id=f"sf-{status.value}", source="news", subject="SPY", endpoint="e", started_at=AWARE,
+                finished_at=AWARE, status=status,
+            ))
+        for source in SignalSource:
+            fetch = record_fetch(conn, SignalFetch(
+                source=source.value, subject="SPY", endpoint="e", started_at=AWARE, finished_at=AWARE,
+                status=SignalFetchStatus.OK,
+            ))
+            record_fetch(conn, fetch.model_copy(update={"id": f"sf-{source.value}-items"}), [
+                SignalRecord(
+                    fetch_id=f"sf-{source.value}-items", source=source.value, kind=kind.value, subject="SPY",
+                    source_item_id=kind.value, endpoint="e", fetched_at=AWARE, headline="h", engagement=0,
+                    confidence=0.5,
+                )
+                for kind in SignalKind
+            ])
         assert {table: _count(conn, table) for table in TABLES} == {
             "proposals": 8, "proposal_legs": 4, "reasoning": 4, "policy_decisions": 4, "approvals": 3,
             "orders": 10, "fills": 0, "position_snapshots": 0, "pnl_snapshots": 0, "events": 5, "controls": 2,
-            "forecast_runs": 2, "forecasts": 4,
+            "forecast_runs": 2, "forecasts": 4, "signal_fetches": 9, "signals": 4,
         }
 
         ts = AWARE.isoformat()
@@ -1108,6 +1138,17 @@ class TestSchemaConstraints:
                 ("id", "TEXT"), ("run_id", "TEXT"), ("symbol", "TEXT"), ("event", "TEXT"),
                 ("horizon_sessions", "INTEGER"), ("probability", "REAL"), ("rationale", "TEXT"),
             ]),
+            "signal_fetches": (SignalFetch, [  # 0006
+                ("id", "TEXT"), ("cycle_id", "TEXT"), ("source", "TEXT"), ("subject", "TEXT"), ("endpoint", "TEXT"),
+                ("started_at", "TEXT"), ("finished_at", "TEXT"), ("status", "TEXT"), ("http_status", "INTEGER"),
+                ("error", "TEXT"), ("item_count", "INTEGER"),
+            ]),
+            "signals": (SignalRecord, [  # 0006
+                ("id", "TEXT"), ("fetch_id", "TEXT"), ("source", "TEXT"), ("kind", "TEXT"), ("subject", "TEXT"),
+                ("source_item_id", "TEXT"), ("endpoint", "TEXT"), ("published_at", "TEXT"), ("fetched_at", "TEXT"),
+                ("headline", "TEXT"), ("summary", "TEXT"), ("sentiment", "REAL"), ("sentiment_raw", "REAL"),
+                ("engagement", "REAL"), ("url", "TEXT"), ("confidence", "REAL"), ("raw_json", "TEXT"),
+            ]),
         }
         # every record table; ``controls`` is keyed rows, not records (TestControls pins its columns)
         assert set(expected) == set(TABLES) - {"controls"}
@@ -1156,6 +1197,10 @@ class TestSchemaConstraints:
             "forecast_runs": ("INSERT INTO forecast_runs VALUES (?, 'primary', ?, ?, '2026-10-22', 'SPY', 'm', 'm',"
                               " 'v', 'e', '[]', '{}')", (ts, ts)),
             "forecasts": ("INSERT INTO forecasts VALUES (?, 'id-forecast_runs', 'AAPL', 'up', 1, 0.5, 'r')", ()),
+            "signal_fetches": ("INSERT INTO signal_fetches VALUES (?, NULL, 'news', 'SPY', 'e', ?, ?, 'ok', NULL,"
+                               " NULL, 0)", (ts, ts)),
+            "signals": ("INSERT INTO signals VALUES (?, 'id-signal_fetches', 'news', 'news', 'SPY', 'x', 'e', NULL,"
+                        " ?, 'h', NULL, NULL, NULL, 0, NULL, 0.5, '{}')", (ts,)),
         }
         assert set(rows) == set(TABLES) - {"controls"}  # which has no id: its primary key is ``key``
         for table, (sql, params) in rows.items():
@@ -1169,7 +1214,7 @@ class TestSchemaConstraints:
         assert {table: _count(conn, table) for table in TABLES} == {
             "proposals": 2, "proposal_legs": 1, "reasoning": 1, "policy_decisions": 1, "approvals": 1,
             "orders": 2, "fills": 1, "position_snapshots": 1, "pnl_snapshots": 1, "events": 1, "controls": 2,
-            "forecast_runs": 1, "forecasts": 1,
+            "forecast_runs": 1, "forecasts": 1, "signal_fetches": 1, "signals": 1,
         }
         trace = get_proposal_trace(conn, "prop-0001")  # and every read still maps
         assert len(trace.fills) == 1 and len(trace.legs) == 1 and len(trace.reasoning) == 1
@@ -1399,11 +1444,11 @@ class TestModels:
     def test_store_status_model(self):
         report = StoreStatus(
             path="x.db", exists=True, schema_version=3, journal_mode="wal",
-            applied_migrations=("0001_initial", "0002_reasoning_cycles_and_legs", "0003_controls", "0004_execution", "0005_forecasts"),
+            applied_migrations=("0001_initial", "0002_reasoning_cycles_and_legs", "0003_controls", "0004_execution", "0005_forecasts", "0006_signals"),
             pending_migrations=(), row_counts={table: 0 for table in TABLES},
         )
-        assert report.applied_migrations == ("0001_initial", "0002_reasoning_cycles_and_legs", "0003_controls", "0004_execution", "0005_forecasts")
-        assert set(report.row_counts) == set(TABLES) and len(report.row_counts) == 13
+        assert report.applied_migrations == ("0001_initial", "0002_reasoning_cycles_and_legs", "0003_controls", "0004_execution", "0005_forecasts", "0006_signals")
+        assert set(report.row_counts) == set(TABLES) and len(report.row_counts) == 15
 
 
 class TestFixture:
@@ -1449,7 +1494,7 @@ class TestStatus:
         report = status(conn, db_path)
         assert report == StoreStatus(
             path=str(db_path), exists=True, schema_version=LATEST, journal_mode="wal",
-            applied_migrations=("0001_initial", "0002_reasoning_cycles_and_legs", "0003_controls", "0004_execution", "0005_forecasts"),
+            applied_migrations=("0001_initial", "0002_reasoning_cycles_and_legs", "0003_controls", "0004_execution", "0005_forecasts", "0006_signals"),
             pending_migrations=(), row_counts=_FRESH_COUNTS,  # the two seeded control rows, nothing else
         )
         assert list(report.row_counts) == list(TABLES)
@@ -1463,7 +1508,7 @@ class TestStatus:
         report = status(conn, db_path)
         assert report.exists is True and report.schema_version == 0
         assert report.applied_migrations == ()
-        assert report.pending_migrations == ("0001_initial", "0002_reasoning_cycles_and_legs", "0003_controls", "0004_execution", "0005_forecasts")
+        assert report.pending_migrations == ("0001_initial", "0002_reasoning_cycles_and_legs", "0003_controls", "0004_execution", "0005_forecasts", "0006_signals")
         assert report.row_counts == {table: 0 for table in TABLES}
         assert report.missing_tables == ()  # not created yet is not the same as dropped
         conn.close()
@@ -1481,7 +1526,7 @@ class TestStatus:
         expected = {
             "proposals": 2, "proposal_legs": 7, "reasoning": 3, "policy_decisions": 1, "approvals": 1,
             "orders": 1, "fills": 2, "position_snapshots": 4, "pnl_snapshots": 5, "events": 6, "controls": 2,
-            "forecast_runs": 0, "forecasts": 0,
+            "forecast_runs": 0, "forecasts": 0, "signal_fetches": 0, "signals": 0,
         }
         assert status(conn, db_path).row_counts == expected
         assert {table: _count(conn, table) for table in TABLES} == expected
@@ -1962,7 +2007,7 @@ class TestRepo:
         assert {table: _count(conn, table) for table in TABLES} == {
             "proposals": 1, "proposal_legs": 0, "reasoning": 3, "policy_decisions": 1, "approvals": 1,
             "orders": 1, "fills": 1, "position_snapshots": 0, "pnl_snapshots": 0, "events": 1, "controls": 2,
-            "forecast_runs": 0, "forecasts": 0,
+            "forecast_runs": 0, "forecasts": 0, "signal_fetches": 0, "signals": 0,
         }
         trace = get_proposal_trace(conn, "prop-0001")
         assert len(trace.reasoning) == 3 and len(trace.decisions) == 1 and len(trace.fills) == 1
@@ -2127,7 +2172,7 @@ class TestRepo:
         assert {table: _count(conn, table) for table in TABLES} == {
             "proposals": 1, "proposal_legs": 0, "reasoning": 3, "policy_decisions": 1, "approvals": 1,
             "orders": 1, "fills": 1, "position_snapshots": 0, "pnl_snapshots": 0, "events": 0, "controls": 2,
-            "forecast_runs": 0, "forecasts": 0,
+            "forecast_runs": 0, "forecasts": 0, "signal_fetches": 0, "signals": 0,
         }
 
     def test_repo_functions_are_re_exported(self):
@@ -3117,14 +3162,14 @@ class TestCli:
         assert db_path.exists()
         assert str(db_path) in out and "(created)" in out
         assert "journal mode: wal" in out
-        assert "schema version 5 (applied: 0001_initial, 0002_reasoning_cycles_and_legs, 0003_controls, 0004_execution, 0005_forecasts)" in out
+        assert "schema version 6 (applied: 0001_initial, 0002_reasoning_cycles_and_legs, 0003_controls, 0004_execution, 0005_forecasts, 0006_signals)" in out
         assert "up to date" not in out
 
         assert cli_db.main(["init", "--db", str(db_path)]) == 0
         out = capsys.readouterr().out
         assert "(created)" not in out and "wal" in out
         assert (
-            "schema version 5 (applied: 0001_initial, 0002_reasoning_cycles_and_legs, 0003_controls, 0004_execution, 0005_forecasts) [up to date]"
+            "schema version 6 (applied: 0001_initial, 0002_reasoning_cycles_and_legs, 0003_controls, 0004_execution, 0005_forecasts, 0006_signals) [up to date]"
         ) in out
         conn = connect(db_path)
         assert conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == LATEST
@@ -3146,14 +3191,14 @@ class TestCli:
         out = capsys.readouterr().out
         assert str(db_path) in out and "exists: yes" in out
         assert "journal mode: wal" in out
-        assert "schema version 5 (applied: 0001_initial, 0002_reasoning_cycles_and_legs, 0003_controls, 0004_execution, 0005_forecasts)" in out
+        assert "schema version 6 (applied: 0001_initial, 0002_reasoning_cycles_and_legs, 0003_controls, 0004_execution, 0005_forecasts, 0006_signals)" in out
         assert "pending migrations: none" in out
         counts = dict(re.findall(r"^  (\w+)\s+(\d+)$", out, re.MULTILINE))
-        assert list(counts) == list(TABLES) and len(counts) == 13  # every table, in TABLES order
+        assert list(counts) == list(TABLES) and len(counts) == 15  # every table, in TABLES order
         assert {t: int(n) for t, n in counts.items()} == {
             "proposals": 2, "proposal_legs": 2, "reasoning": 3, "policy_decisions": 1, "approvals": 1,
             "orders": 1, "fills": 1, "position_snapshots": 0, "pnl_snapshots": 0, "events": 0, "controls": 2,
-            "forecast_runs": 0, "forecasts": 0,
+            "forecast_runs": 0, "forecasts": 0, "signal_fetches": 0, "signals": 0,
         }
 
     def test_db_status_on_unmigrated_file(self, db_path, capsys):
@@ -3161,7 +3206,7 @@ class TestCli:
         assert cli_db.main(["status", "--db", str(db_path)]) == 0
         out = capsys.readouterr().out
         assert "schema version 0 (applied: none)" in out
-        assert "pending migrations: 0001_initial, 0002_reasoning_cycles_and_legs, 0003_controls, 0004_execution, 0005_forecasts" in out
+        assert "pending migrations: 0001_initial, 0002_reasoning_cycles_and_legs, 0003_controls, 0004_execution, 0005_forecasts, 0006_signals" in out
         assert re.search(r"^  events\s+0$", out, re.MULTILINE)
         assert re.search(r"^  proposal_legs\s+0$", out, re.MULTILINE)
         assert re.search(r"^  controls\s+0$", out, re.MULTILINE)  # not created yet: no seed rows either
@@ -3371,7 +3416,7 @@ class TestCli:
         assert cli_db.main(["init", "--db", ":memory:"]) == 0
         out = capsys.readouterr().out
         assert "database: :memory:" in out and "journal mode: memory" in out
-        assert "schema version 5 (applied: 0001_initial, 0002_reasoning_cycles_and_legs, 0003_controls, 0004_execution, 0005_forecasts)" in out
+        assert "schema version 6 (applied: 0001_initial, 0002_reasoning_cycles_and_legs, 0003_controls, 0004_execution, 0005_forecasts, 0006_signals)" in out
         assert cli_db.main(["status", "--db", ":memory:"]) == 1
         assert "exists: no" in capsys.readouterr().out
         assert cli_trace.main(["prop-0001", "--db", ":memory:"]) == 1
@@ -3406,7 +3451,7 @@ class TestCli:
         captured = capsys.readouterr()
         assert captured.out == ""
         assert captured.err.startswith("trace failed: ")
-        assert "pending migrations (0001_initial, 0002_reasoning_cycles_and_legs, 0003_controls, 0004_execution, 0005_forecasts)" in captured.err
+        assert "pending migrations (0001_initial, 0002_reasoning_cycles_and_legs, 0003_controls, 0004_execution, 0005_forecasts, 0006_signals)" in captured.err
         assert "aegis.cli.db init" in captured.err and captured.err.count("\n") == 1
         conn = connect(db_path)
         assert schema_version(conn) == 0 and _table_names(conn) == set()
@@ -3416,12 +3461,12 @@ class TestCli:
         migrations.mkdir()
         for _, _, real in list_migrations():
             (migrations / real.name).write_text(real.read_text(encoding="utf-8"), encoding="utf-8")
-        (migrations / "0006_extra.sql").write_text(
+        (migrations / "0007_extra.sql").write_text(
             "CREATE TABLE IF NOT EXISTS extra (id TEXT PRIMARY KEY NOT NULL);\n", encoding="utf-8"
         )
         monkeypatch.setattr(store_db, "MIGRATIONS_DIR", migrations)
         assert cli_trace.main(["prop-0001", "--db", str(db_path)]) == 1
-        assert "pending migrations (0006_extra)" in capsys.readouterr().err
+        assert "pending migrations (0007_extra)" in capsys.readouterr().err
         assert schema_version(conn) == LATEST and "extra" not in _table_names(conn)
         conn.close()
 

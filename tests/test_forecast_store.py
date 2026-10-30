@@ -44,7 +44,7 @@ class TestMigration:
         with pytest.raises(StoreError):  # before 0005 the table refuses the new stage
             add_reasoning(conn, Reasoning(cycle_id="cyc-1", stage=ReasoningStage.FORECAST, content="x"))
         before = [(r.id, r.stage, r.content, r.tokens_in) for r in get_cycle_reasoning(conn, "cyc-1")]
-        assert migrate(conn) == 5
+        assert migrate(conn) == len(list_migrations())
         after = [(r.id, r.stage, r.content, r.tokens_in) for r in get_cycle_reasoning(conn, "cyc-1")]
         assert after == before and len(after) == 3
         add_reasoning(conn, Reasoning(cycle_id="run-1", stage=ReasoningStage.FORECAST, content="x"))
