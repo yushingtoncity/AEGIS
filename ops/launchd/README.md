@@ -9,8 +9,8 @@ always, whether anything is sent at all.
 
 | Job | When | What |
 |---|---|---|
-| `local.aegis.cycle` | weekdays 10:00, 11:30, 13:30, 15:00 local (New York) time | market check, `brain once`, `policy evaluate <the id it printed>`, `orders tick`, `notify send`. The 15:00 cycle then runs `forecasts run` (the day's per-ticker forecasts) |
-| `local.aegis.tick` | every 5 minutes, but only acts 09:25 to 16:30 ET on weekdays | market open: `orders tick`, `notify send`. Close to 16:30: `orders sync`, `notify send` (places nothing). From 16:20 it also runs `notify summary` before `notify send`: the end-of-day text |
+| `local.aegis.cycle` | weekdays 10:00, 11:30, 13:30, 15:00 local (New York) time | market check, `brain once`, `policy evaluate <the id it printed>`, `orders tick`, `notify send`, `notify feed-send --if-enabled`. The 15:00 cycle then runs `forecasts run` (the day's per-ticker forecasts) |
+| `local.aegis.tick` | every 5 minutes, but only acts 09:25 to 16:30 ET on weekdays | market open: `orders tick`, `notify send`, `notify feed-send --if-enabled`. Close to 16:30: `orders sync`, `notify send`, `notify feed-send --if-enabled` (places nothing). From 16:20 it also runs `notify summary` and `notify feed-recap --if-enabled` before sending: the end-of-day text and the friends' recap. The feed steps do nothing while `feed.enabled` is false |
 
 Both jobs call `aegis-run.sh` with this checkout's `.venv/bin/python`. The
 following rules apply:
