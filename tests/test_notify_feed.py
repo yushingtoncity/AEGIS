@@ -484,6 +484,23 @@ class TestCli:
         assert _run(["feed-send", "--db", str(store)], _config(enabled=True), monkeypatch, channel) == 1
         assert "1 not posted" in capsys.readouterr().err
 
+    @pytest.mark.parametrize("command", ["feed-send", "feed-recap"])
+    def test_if_enabled_skips_quietly_while_off(self, store, monkeypatch, capsys, command):
+        channel = FakeChannel()
+        assert _run([command, "--db", str(store), "--if-enabled"], _config(), monkeypatch, channel) == 0
+        assert "skipped" in capsys.readouterr().out and channel.sent == []
+        conn = open_store(store)
+        assert get_events_since(conn, NOW - timedelta(days=2), kind=FEED_RECAP) == []
+        conn.close()
+
+    def test_if_enabled_still_sends_while_on(self, store, monkeypatch, capsys):
+        conn = open_store(store)
+        _filled(conn)
+        conn.close()
+        channel = FakeChannel()
+        assert _run(["feed-send", "--db", str(store), "--if-enabled"], _config(enabled=True), monkeypatch, channel) == 0
+        assert len(channel.sent) == 1
+
     def test_test_works_while_off(self, monkeypatch, capsys):
         channel = FakeChannel()
         assert _run(["feed-test"], _config(), monkeypatch, channel) == 0

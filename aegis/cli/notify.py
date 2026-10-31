@@ -5,9 +5,9 @@ Run:  python -m aegis.cli.notify pending [--db PATH]
       python -m aegis.cli.notify test
       python -m aegis.cli.notify summary [--db PATH] [--day YYYY-MM-DD] [--logs DIR] [--dry-run]
       python -m aegis.cli.notify feed-pending [--db PATH]
-      python -m aegis.cli.notify feed-send [--db PATH]
+      python -m aegis.cli.notify feed-send [--db PATH] [--if-enabled]
       python -m aegis.cli.notify feed-test
-      python -m aegis.cli.notify feed-recap [--db PATH] [--day YYYY-MM-DD] [--dry-run]
+      python -m aegis.cli.notify feed-recap [--db PATH] [--day YYYY-MM-DD] [--dry-run] [--if-enabled]
 
 ``pending`` lists the notices a ``send`` would push now (the events at or
 above ``notify.min_level`` or of a kind in ``notify.kinds``, younger than
@@ -47,7 +47,9 @@ posts them and needs ``feed.enabled: true``. ``feed-test`` posts one fixed
 message and touches no database. ``feed-recap`` writes the day's
 ``feed_recap`` event (at most one per New York day) for the next
 ``feed-send``; like ``summary`` it reads the paper account once and keeps
-only the day's change.
+only the day's change. With ``--if-enabled``, ``feed-send`` and
+``feed-recap`` exit 0 and do nothing while ``feed.enabled`` is false, which
+is how the launchd runner calls them.
 
 ``main(argv, *, channel_factory=None, feed_channel_factory=None, clock=None, account_reader=None)``:
 tests inject stand-in channels and a fixed clock.
@@ -321,14 +323,20 @@ def _parser() -> _Parser:
     summary.add_argument("--dry-run", action="store_true", help="print the text, write nothing")
     test_help = "push one test notice (no database needed)"
     commands.add_parser("test", help=test_help, description=test_help)
-    for name, help_text in (
-        ("feed-pending", "print every post a feed-send would make now; write nothing"),
-        ("feed-send", "post everything due to the friends' feed and record each attempt"),
-    ):
-        commands.add_parser(name, parents=[common], help=help_text, description=help_text)
+    pending_help = "print every post a feed-send would make now; write nothing"
+    commands.add_parser("feed-pending", parents=[common], help=pending_help, description=pending_help)
+    if_enabled = argparse.ArgumentParser(add_help=False)
+    if_enabled.add_argument(
+        "--if-enabled", action="store_true",
+        help="exit 0 and do nothing while feed.enabled is false (for the scheduler)",
+    )
+    send_help = "post everything due to the friends' feed and record each attempt"
+    commands.add_parser(
+        "feed-send", parents=[common, if_enabled], help=send_help, description=send_help
+    )
     recap_help = "write the day's recap for the next feed-send (once a day)"
     recap = commands.add_parser(
-        "feed-recap", parents=[common], help=recap_help, description=recap_help
+        "feed-recap", parents=[common, if_enabled], help=recap_help, description=recap_help
     )
     recap.add_argument("--day", type=_day, help="the New York day (default: today)")
     recap.add_argument("--dry-run", action="store_true", help="print the recap, write nothing")
@@ -367,6 +375,9 @@ def main(
         db_path = _db_path(args.db)
         if args.command == "feed-pending":
             return _feed_pending(db_path, config, now_of())
+        if args.command in ("feed-send", "feed-recap") and args.if_enabled and not config.feed.enabled:
+            print("feed.enabled is false in config.yaml: skipped")
+            return 0
         if args.command == "feed-send":
             return _feed_send(db_path, config, feed_factory, now_of)
         if args.command == "feed-recap":
