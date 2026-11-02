@@ -461,6 +461,15 @@ class TestCollect:
         assert [s.status for s in again.statuses] == ["cached"] and len(again.digest.lines) == 1
         assert [f.status for f in get_cycle_fetches(conn, "c-2")] == [SignalFetchStatus.CACHED]
 
+    def test_the_real_news_source_fails_closed_under_the_test_guard(self, conn):
+        """No source injected: the real Alpaca News client runs, finds the
+        empty keys the conftest sets, and is recorded as an error. No request
+        leaves the machine, whatever .env holds."""
+        result = collect_signals(conn, SIGNALS_ON, tickers=["NVDA"], now=NOW)
+        assert [(s.source, s.status) for s in result.statuses] == [("news", "error")]
+        assert "ALPACA_API_KEY" in result.statuses[0].detail
+        assert result.digest.lines == ()
+
     def test_configured_tickers_replace_the_watchlist(self, conn):
         source = FakeSource()
         collect_signals(conn, SignalsConfig(enabled=True, tickers=("TTWO",)), tickers=["SPY"],
