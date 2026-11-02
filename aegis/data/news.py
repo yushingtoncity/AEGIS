@@ -13,6 +13,10 @@ from aegis.data.cache import default_cache
 from aegis.data.clients import news_client
 from aegis.data.errors import DataError
 from aegis.data.models import NewsItem, as_mapping, utcnow
+from aegis.data.signals import Signal, SignalKind, SignalSource, SourceError
+
+NEWS_ENDPOINT = "alpaca:/v1beta1/news"
+"""Where news signals come from, recorded on every fetch and signal row."""
 
 
 def get_news(
@@ -47,3 +51,39 @@ def get_news(
         ]
 
     return default_cache.get_or_fetch(("news", symbols_arg, limit), ttl, fetch)
+
+
+def news_to_signals(
+    items: Sequence[NewsItem], subject: str, confidence: float
+) -> list[Signal]:
+    """Alpaca news items as signals about ``subject``. Alpaca scores no
+    sentiment, so every one is unscored (``sentiment=None``) and carries no
+    engagement count."""
+    return [
+        Signal(
+            source=SignalSource.NEWS,
+            kind=SignalKind.NEWS,
+            subject=subject,
+            source_item_id=str(item.id),
+            endpoint=NEWS_ENDPOINT,
+            published_at=item.published_at,
+            headline=item.headline,
+            summary=item.summary,
+            url=item.url,
+            confidence=confidence,
+            raw=item.model_dump(mode="json"),
+            fetched_at=item.fetched_at,
+        )
+        for item in items
+        if str(item.id) and item.headline
+    ]
+
+
+def news_signals(subject: str, *, limit: int, confidence: float, market_wide: bool) -> list[Signal]:
+    """Headlines for one ticker (or, ``market_wide``, the unfiltered feed
+    for a topic) as signals; a failed fetch is a ``SourceError``."""
+    try:
+        items = get_news(None if market_wide else subject, limit=limit)
+    except DataError as exc:
+        raise SourceError("error", f"alpaca news fetch failed ({type(exc.cause).__name__})") from None
+    return news_to_signals(items, subject, confidence)

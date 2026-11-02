@@ -368,6 +368,51 @@ class ForecastRecord(StoreRecord):
         return _upper_symbol(value)
 
 
+
+class SignalFetchStatus(str, Enum):
+    OK = "ok"
+    CACHED = "cached"              # served from rows a recent fetch stored; no request made
+    RATE_LIMITED = "rate_limited"  # the limiter or the provider (HTTP 429) said no
+    ERROR = "error"
+    DISABLED = "disabled"          # switched off, or its credential is missing
+
+
+class SignalFetch(StoreRecord):
+    """One attempt to read one source about one subject (migration 0006)."""
+
+    cycle_id: str | None = None
+    source: str
+    subject: str
+    endpoint: str
+    started_at: datetime
+    finished_at: datetime
+    status: SignalFetchStatus
+    http_status: int | None = None
+    error: str | None = None
+    item_count: int = Field(default=0, ge=0)
+
+
+class SignalRecord(StoreRecord):
+    """One stored signal with its provenance: the fetch that brought it, the
+    endpoint, the provider's item id and the provider's own payload."""
+
+    fetch_id: str
+    source: str
+    kind: str
+    subject: str
+    source_item_id: str
+    endpoint: str
+    published_at: datetime | None = None
+    fetched_at: datetime
+    headline: str
+    summary: str | None = None
+    sentiment: float | None = Field(default=None, ge=-1.0, le=1.0)
+    sentiment_raw: float | None = None
+    engagement: float = Field(ge=0.0)
+    url: str | None = None
+    confidence: float = Field(ge=0.0, le=1.0)
+    raw_json: dict[str, Any] = Field(default_factory=dict)
+
 class PolicyDecision(StoreRecord):
     """The policy engine's verdict on a proposal and the rules it checked."""
 

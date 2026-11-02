@@ -251,7 +251,7 @@ NAMESPACE_CALLS = frozenset({"globals", "vars", "locals"})
 
 # What sits outside the two packages today — the coverage test pins the scan to it.
 EXPECTED_OUTSIDE = {
-    "__init__.py", "config.py", "brain", "cli", "dashboard", "data", "forecasts", "notify", "pricing", "scorecard", "store",
+    "__init__.py", "config.py", "brain", "cli", "dashboard", "data", "forecasts", "notify", "pricing", "scorecard", "signals", "store",
 }
 EXPECTED_POLICY_MODULES = {
     "__init__.py", "context.py", "engine.py", "errors.py", "limits.py", "measures.py",
@@ -1896,7 +1896,7 @@ class TestOnlyPolicyMayReferenceAnExecutor:
         # the policy CLI is outside the engine: it is scanned like every other module
         assert CLI_POLICY.exists() and CLI_POLICY in outside
         assert {AEGIS_DIR / "__init__.py", AEGIS_DIR / "config.py"} <= outside
-        for package in ("data", "pricing", "store", "brain", "cli", "notify", "dashboard", "scorecard", "forecasts"):
+        for package in ("data", "pricing", "store", "brain", "cli", "notify", "dashboard", "scorecard", "forecasts", "signals"):
             assert AEGIS_DIR / package / "__init__.py" in outside, package
         assert AEGIS_DIR / "brain" / "prompts" / "__init__.py" in outside  # nested packages too
 

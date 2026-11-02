@@ -20,7 +20,9 @@ real ``AnthropicLLM`` or a ``FakeLLM`` — writing the audit trail as it goes:
 - the ``proposals`` row and its ``proposal_legs`` when the proposal stage
   trades, written together with that link, all or none;
 - events: ``cycle_start``, ``market_snapshot`` (the scan stage's whole
-  input — the audit copy of what the model was shown), then ``proposal``
+  input — the audit copy of what the model was shown), with signals on a
+  ``signals_digest`` (the stored ids of the signals the scan was shown, in
+  rank order; ``aegis.signals``), then ``proposal``
   or ``no_trade``, ``brain_error`` on a failure, and always ``cycle_end``
   with the outcome, the tokens (a failed stage's included) and the cost
   estimate. The guard logs its own ``budget_halt``. Every payload carries
@@ -82,6 +84,8 @@ from aegis.brain.stage import StageOutputInvalid
 from aegis.brain.thesis import run_thesis
 from aegis.config import AegisConfig, get_config
 from aegis.data.models import utcnow
+from aegis.signals.collect import CollectResult, collect_signals, signals_active
+from aegis.signals.source import Source
 from aegis.store.errors import StoreError
 from aegis.store.models import (
     Event,
@@ -103,6 +107,8 @@ from aegis.store.repo import (
 
 MARKET_SNAPSHOT_EVENT = "market_snapshot"
 """Event kind carrying a cycle's snapshot; ``snapshot_from_event`` reads it back."""
+SIGNALS_DIGEST_EVENT = "signals_digest"
+"""Event kind recording which signals (by stored id, in rank order) the scan stage was shown."""
 
 
 # --- store records and events (pure; the stage CLI reuses them) -----------------
@@ -401,6 +407,78 @@ def _no_trade(
     return "no_trade"
 
 
+def signals_digest_event(cycle_id: str, active: bool, result: CollectResult | None) -> Event:
+    """The ``signals_digest`` event: whether this cycle was a signals cycle,
+    and if so every shown signal's stored id, rank, weight and score, each
+    source's status and the digest's token estimate."""
+    payload: dict[str, Any] = {"cycle_id": cycle_id, "active": active}
+    if result is not None:
+        digest = result.digest
+        payload |= {
+            "shown": [
+                {"signal_id": line.signal_id, "rank": line.rank, "weight": line.weight, "score": line.score}
+                for line in digest.lines
+            ],
+            "considered": result.considered,
+            "dropped": digest.dropped,
+            "token_estimate": digest.token_estimate,
+            "sources": [status.model_dump() for status in result.statuses],
+        }
+    shown = len(payload.get("shown", []))
+    message = (
+        f"cycle {cycle_id} showed the scan stage {shown} signals"
+        if active
+        else f"cycle {cycle_id} ran without signals (assignment)"
+    )
+    return _cycle_event(SIGNALS_DIGEST_EVENT, message, payload)
+
+
+def _signals_for_scan(
+    conn: sqlite3.Connection,
+    config: AegisConfig,
+    cycle_id: str,
+    snapshot: MarketSnapshot,
+    sources: Sequence[Source] | None,
+) -> tuple[str, ...]:
+    """The digest lines for this cycle's scan, or none.
+
+    Off (``signals.enabled: false``) does nothing and logs nothing, so the
+    cycle is exactly what it was before signals existed. On, every outcome
+    is logged as ``signals_digest``; a failure anywhere in collecting (the
+    store included) is a WARNING ``signals_error`` and the scan runs without
+    signals. Signals can never stop a cycle.
+    """
+    if not config.signals.enabled:
+        return ()
+    if not signals_active(config.signals, snapshot.taken_at):
+        log_event(conn, signals_digest_event(cycle_id, False, None))
+        return ()
+    try:
+        result = collect_signals(
+            conn,
+            config.signals,
+            tickers=[s.symbol for s in snapshot.symbols],
+            cycle_id=cycle_id,
+            sources=sources,
+        )
+        log_event(conn, signals_digest_event(cycle_id, True, result))
+    except Exception as exc:
+        try:
+            log_event(
+                conn,
+                Event(
+                    level=EventLevel.WARNING,
+                    kind="signals_error",
+                    message=f"cycle {cycle_id} ran without signals: {_describe(exc)}",
+                    payload={"cycle_id": cycle_id, "error": _describe(exc)},
+                ),
+            )
+        except StoreError:
+            pass
+        return ()
+    return tuple(line.text for line in result.digest.lines)
+
+
 def _run_stages(
     conn: sqlite3.Connection,
     llm: LLMClient,
@@ -409,6 +487,7 @@ def _run_stages(
     snapshot: MarketSnapshot | None,
     now: datetime | None,
     ledger: _Ledger,
+    signal_sources: Sequence[Source] | None = None,
 ) -> CycleOutcome:
     """Steps 3-8 of the cycle; ``BrainError``/``BudgetExceeded`` propagate to ``run_cycle``."""
     brain = config.brain
@@ -416,8 +495,10 @@ def _run_stages(
         snapshot = build_market_snapshot(config=config, now=now)
     log_event(conn, market_snapshot_event(cycle_id, snapshot))
 
+    signal_lines = _signals_for_scan(conn, config, cycle_id, snapshot, signal_sources)
+
     ledger.stage = ReasoningStage.SCAN
-    scan = run_scan(llm, snapshot, brain, cycle_id=cycle_id)
+    scan = run_scan(llm, snapshot, brain, cycle_id=cycle_id, signals=signal_lines)
     _record_stage(conn, ledger, cycle_id, scan.usage, scan.raw_output)
     ledger.brief = scan.brief
 
@@ -507,6 +588,7 @@ def run_cycle(
     config: AegisConfig | None = None,
     snapshot: MarketSnapshot | None = None,
     now: datetime | None = None,
+    signal_sources: Sequence[Source] | None = None,
 ) -> CycleResult:
     """Run one brain cycle against the store: see the module docstring.
 
@@ -543,7 +625,9 @@ def run_cycle(
     guarded = GuardedLLM(llm, guard)
     prices = config.brain.prices_per_mtok
     try:
-        outcome = _run_stages(conn, guarded, config, cycle_id, snapshot, now, ledger)
+        outcome = _run_stages(
+            conn, guarded, config, cycle_id, snapshot, now, ledger, signal_sources
+        )
     except BudgetExceeded as exc:
         _record_spend(conn, ledger, guard, cycle_id, config, exc)
         outcome = "halted"  # the guard has logged budget_halt; the rows so far stay
