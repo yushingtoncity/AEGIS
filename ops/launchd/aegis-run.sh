@@ -2,10 +2,15 @@
 # Run one scheduled AEGIS step on the mini. launchd calls this; see
 # ops/launchd/README.md.
 #
-#   aegis-run.sh cycle   market open: brain once, judge its proposal, tick, notify;
-#                        the 15:00 cycle then makes the day's forecasts
-#   aegis-run.sh tick    market open: tick, notify; close to 16:30 ET: sync, notify;
-#                        from 16:20 ET it also writes the day's summary text first
+#   aegis-run.sh cycle   market open: brain once, judge its proposal, tick, notify,
+#                        post to the friends' feed; the 15:00 cycle then makes the
+#                        day's forecasts
+#   aegis-run.sh tick    market open: tick, notify, feed; close to 16:30 ET: sync,
+#                        notify, feed; from 16:20 ET it also writes the day's summary
+#                        and feed recap first
+#
+# The feed steps pass --if-enabled: while feed.enabled is false they exit 0
+# and post nothing, so a machine without the feed logs no failure.
 #
 # Only existing CLI commands run here: the policy engine still judges every
 # proposal and `orders tick` is still the only thing that places. The market
@@ -117,6 +122,7 @@ run_cycle() {
   fi
   step aegis.cli.orders tick
   step aegis.cli.notify send
+  step aegis.cli.notify feed-send --if-enabled
   # last, so the trading steps never wait on it; it reads nothing they write
   if [ "$NY_HHMM" -ge "$FORECAST_FROM" ] && [ "$NY_HHMM" -lt "$FORECAST_UNTIL" ]; then
     step aegis.cli.forecasts run
@@ -130,12 +136,15 @@ run_tick() {
   if [ "$state" = open ]; then
     step aegis.cli.orders tick
     step aegis.cli.notify send
+    step aegis.cli.notify feed-send --if-enabled
   elif [ "$state" = closed ] && [ "$NY_HHMM" -ge 1600 ]; then
     step aegis.cli.orders sync
     if [ "$NY_HHMM" -ge "$SUMMARY_FROM" ]; then
       step aegis.cli.notify summary --logs "$LOG_DIR"
+      step aegis.cli.notify feed-recap --if-enabled
     fi
     step aegis.cli.notify send
+    step aegis.cli.notify feed-send --if-enabled
   elif [ "$state" = unknown ]; then
     log "skipped: market clock unreadable"
   fi

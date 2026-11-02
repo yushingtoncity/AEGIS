@@ -99,6 +99,9 @@ def log(box: Path, mode: str) -> str:
     return path.read_text() if path.exists() else ""
 
 
+FEED = "aegis.cli.notify feed-send --if-enabled"
+
+
 # --- the cycle ---------------------------------------------------------------
 
 
@@ -109,6 +112,7 @@ def test_a_cycle_judges_the_proposal_its_brain_run_printed_then_ticks_and_notifi
         f"aegis.cli.policy evaluate {PROPOSAL_ID}",
         "aegis.cli.orders tick",
         "aegis.cli.notify send",
+        "aegis.cli.notify feed-send --if-enabled",
     ]
     assert "SPY (equity)" in log(box, "cycle")
 
@@ -119,6 +123,7 @@ def test_the_15_00_cycle_makes_the_days_forecasts_after_the_trading_steps(box: P
         "aegis.cli.brain once",
         "aegis.cli.orders tick",
         "aegis.cli.notify send",
+        "aegis.cli.notify feed-send --if-enabled",
         "aegis.cli.forecasts run",
     ]
     assert "exit 0: aegis.cli.forecasts run" in log(box, "cycle")
@@ -137,7 +142,7 @@ def test_a_closed_market_makes_no_forecasts_either(box: Path) -> None:
 
 def test_a_cycle_without_a_proposal_judges_nothing(box: Path) -> None:
     run(box, "cycle", brain=NO_TRADE)
-    assert calls(box) == ["aegis.cli.brain once", "aegis.cli.orders tick", "aegis.cli.notify send"]
+    assert calls(box) == ["aegis.cli.brain once", "aegis.cli.orders tick", "aegis.cli.notify send", FEED]
 
 
 def test_only_the_report_line_names_the_proposal(box: Path) -> None:
@@ -148,7 +153,7 @@ def test_only_the_report_line_names_the_proposal(box: Path) -> None:
 
 def test_a_failed_brain_run_still_ticks_and_notifies(box: Path) -> None:
     run(box, "cycle", brain="brain once failed: timeout", brain_exit=1)
-    assert calls(box) == ["aegis.cli.brain once", "aegis.cli.orders tick", "aegis.cli.notify send"]
+    assert calls(box) == ["aegis.cli.brain once", "aegis.cli.orders tick", "aegis.cli.notify send", FEED]
 
 
 @pytest.mark.parametrize(("market", "word"), [("closed", "closed"), ("error", "unknown"), ("", "unknown")])
@@ -163,12 +168,12 @@ def test_a_cycle_runs_nothing_unless_the_market_is_open(box: Path, market: str, 
 
 def test_the_tick_places_and_notifies_while_the_market_is_open(box: Path) -> None:
     run(box, "tick", ny_clock="2 1005")
-    assert calls(box) == ["aegis.cli.orders tick", "aegis.cli.notify send"]
+    assert calls(box) == ["aegis.cli.orders tick", "aegis.cli.notify send", FEED]
 
 
 def test_after_the_close_the_tick_only_syncs_and_notifies(box: Path) -> None:
     run(box, "tick", market="closed", ny_clock="2 1610")
-    assert calls(box) == ["aegis.cli.orders sync", "aegis.cli.notify send"]
+    assert calls(box) == ["aegis.cli.orders sync", "aegis.cli.notify send", FEED]
 
 
 @pytest.mark.parametrize("ny_clock", ["2 1620", "2 1627"])
@@ -177,13 +182,15 @@ def test_from_16_20_the_tick_also_writes_the_days_summary_before_sending(box: Pa
     assert calls(box) == [
         "aegis.cli.orders sync",
         f"aegis.cli.notify summary --logs {box / 'logs'}",
+        "aegis.cli.notify feed-recap --if-enabled",
         "aegis.cli.notify send",
+        "aegis.cli.notify feed-send --if-enabled",
     ]
 
 
 def test_an_open_market_never_writes_the_summary(box: Path) -> None:
     run(box, "tick", market="open", ny_clock="2 1622")  # the clock is late or the session ran long
-    assert calls(box) == ["aegis.cli.orders tick", "aegis.cli.notify send"]
+    assert calls(box) == ["aegis.cli.orders tick", "aegis.cli.notify send", FEED]
 
 
 def test_a_closed_market_before_four_runs_nothing(box: Path) -> None:
@@ -224,7 +231,7 @@ def test_a_lock_whose_owner_died_is_cleared(box: Path) -> None:
     lock.mkdir()
     (lock / "pid").write_text(f"{gone}\n")
     run(box, "tick")
-    assert calls(box) == ["aegis.cli.orders tick", "aegis.cli.notify send"]
+    assert calls(box) == ["aegis.cli.orders tick", "aegis.cli.notify send", FEED]
     assert "cleared a stale lock" in log(box, "tick")
 
 

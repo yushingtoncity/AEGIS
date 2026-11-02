@@ -13,6 +13,10 @@ through ``repo.log_event``, which are how it remembers what went out.
 ``imessage`` (a text from Messages on the mini, the default), ``slack`` (an
 incoming webhook) and ``ntfy`` (a push app); ``channels`` builds the one
 config.yaml names. ``python -m aegis.cli.notify`` is the operator's side.
+
+``feed`` is a second, separate audience: a one-way Discord channel
+(``discord``) where friends can watch what the paper account does, built
+from an allowlist of store fields and never from the operator's notices.
 """
 
 from aegis.notify.errors import NotifyError
