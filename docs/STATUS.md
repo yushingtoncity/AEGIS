@@ -84,6 +84,7 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 | Linux (cloud), Python 3.14 | `python -m pytest -q` | `2ed48d5` (main, PR #25) | 5,703 | 1 | 0 | [Test] (source: Claude Code cloud session, 2026-10-28) |
 | Linux (cloud), Python 3.14 | `python -m pytest -q` | day-summary PR head | 5,736 | 1 | 0 | [Test] (source: Claude Code cloud session, 2026-10-28) |
 | Linux (cloud), Python 3.14.6 | `python -m pytest -q` | signals PR head, merged with main at `242fe4e` | 6,003 | 1 | 0 | [Test] (source: Claude Code cloud session, 2026-11-02) |
+| Linux (cloud), Python 3.14.6 | `python -m pytest -q` | test-isolation PR head (on `fe4210a`) | 6,004 | 1 | 0 | [Test] (source: Claude Code cloud session, 2026-11-02); with `signals.enabled: true` in a local config.yaml, only the shipped-signals-default test fails |
 
 - The cloud skip is `tests/test_brain_architecture.py:1110` ("case-sensitive filesystem"), expected on Linux. [Test]
 - Main `1cadcc3` has the same tree as `d7149a1`, so these results apply to main unchanged. [Code]
@@ -109,7 +110,8 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 
 Merged pull requests, newest first (`git log --merges main`). Git history is the full record.
 
-- (this PR) feat: news and Reddit-mention signals for the scan stage, off by default
+- (this PR) test: keep tests offline and on the shipped signals block when a local config.yaml turns signals on
+- #27 feat: news and Reddit-mention signals for the scan stage, off by default
 - #26 feat: end-of-day iMessage summary from the after-close tick
 - #25 fix: swap delisted EA for RBLX in the forecast universe
 - #24 feat: run the daily forecasts from the 15:00 launchd cycle
