@@ -188,6 +188,12 @@ def test_from_16_20_the_tick_also_writes_the_days_summary_before_sending(box: Pa
     ]
 
 
+def test_until_17_00_the_tick_keeps_retrying_what_failed_to_send(box: Path) -> None:
+    run(box, "tick", market="closed", ny_clock="2 1655")
+    assert "aegis.cli.notify send" in calls(box)
+    assert "aegis.cli.orders tick" not in calls(box)  # after the close nothing is placed
+
+
 def test_an_open_market_never_writes_the_summary(box: Path) -> None:
     run(box, "tick", market="open", ny_clock="2 1622")  # the clock is late or the session ran long
     assert calls(box) == ["aegis.cli.orders tick", "aegis.cli.notify send", FEED]
@@ -204,7 +210,7 @@ def test_an_unreadable_clock_stops_the_tick(box: Path) -> None:
     assert "skipped: market clock unreadable" in log(box, "tick")
 
 
-@pytest.mark.parametrize("ny_clock", ["2 0900", "2 1630", "2 2300", "6 1100", "7 1100"])
+@pytest.mark.parametrize("ny_clock", ["2 0900", "2 1700", "2 2300", "6 1100", "7 1100"])
 def test_nights_and_weekends_do_not_even_ask_the_clock(box: Path, ny_clock: str) -> None:
     assert run(box, "tick", ny_clock=ny_clock).returncode == 0
     assert not asked_clock(box)
