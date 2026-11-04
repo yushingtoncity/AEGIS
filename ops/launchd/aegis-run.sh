@@ -5,7 +5,7 @@
 #   aegis-run.sh cycle   market open: brain once, judge its proposal, tick, notify,
 #                        post to the friends' feed; the 15:00 cycle then makes the
 #                        day's forecasts
-#   aegis-run.sh tick    market open: tick, notify, feed; close to 16:30 ET: sync,
+#   aegis-run.sh tick    market open: tick, notify, feed; close to 17:00 ET: sync,
 #                        notify, feed; from 16:20 ET it also writes the day's summary
 #                        and feed recap first
 #
@@ -29,7 +29,8 @@ LOCK="$LOG_DIR/run.lock"
 MAX_LOG_BYTES=10485760        # roll a log over at 10 MB, keeping one old copy
 STALE_LOCK_MINUTES=10         # a lock with no live owner older than this is cleared
 TICK_WINDOW_START=925         # the tick asks the market clock from 09:25 ET on weekdays...
-WRAP_UP_END=1630              # ...to 16:30 ET: after the close it syncs and notifies, placing nothing
+WRAP_UP_END=1700              # ...to 17:00 ET: after the close it syncs and notifies, placing nothing (to 17:00, not 16:30,
+                              # so a notice that failed after the close, the day summary above all, gets more retries)
 FORECAST_FROM=1500            # a cycle from 15:00 ET until the close also runs `forecasts run` (once a day:
 FORECAST_UNTIL=1600           # it skips an arm that already ran today, and refuses while forecast.enabled is false)
 SUMMARY_FROM=1620             # an after-close tick from 16:20 ET writes the end-of-day summary (once a day: the later ticks find it written)

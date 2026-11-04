@@ -34,7 +34,7 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 | Signals, `aegis/signals`, `aegis/data/apewisdom.py`, `aegis/store/signals.py` | shipped, off by default (`signals.enabled: false`). When on, the brain cycle gathers Alpaca News headlines (on) and ApeWisdom Reddit mention counts (off until checked live) about the watched tickers, stores every item with its provenance (`signal_fetches`, `signals`, migration 0006), dedupes, decays and ranks them, and shows the scan stage only a capped digest inside the untrusted-news block; each cycle's `signals_digest` event names the signals shown. No order path reads it (`tests/test_signals_architecture.py`), and the policy output is identical with signals on and off (`tests/test_signals_policy.py`). Design and measurement plan: `docs/signals/DESIGN.md` | [Code] |
 | Phone approval page, `aegis/approve_web`, `aegis/cli/approve_web.py` | shipped, off by default (`approve_web.enabled: false`). A stdlib server on 127.0.0.1 only, published to the owner's tailnet by `tailscale serve`, where the owner answers a NEEDS_APPROVAL verdict with a Tailscale login check, a PIN (scrypt hash in .env) and a one time form token. It only calls `dispatch.answer(..., channel="phone")`; the tick still re-checks and places. Approval alerts carry a ntfy Review button while it is on. Optional launchd job `local.aegis.approve-web` (`aegisctl.sh approve-web-install`). Design and setup: `docs/approve_web/` | [Code] |
 | Dashboard, `aegis/dashboard` | stub; Phase 8 not approved | [Code] |
-| Scheduler, `ops/launchd` | two launchd jobs on the Mac: a brain cycle at 10:00, 11:30, 13:30 and 15:00 New York time on weekdays (brain once, policy evaluate, orders tick, notify send), and an orders tick every 5 minutes in market hours. The 15:00 cycle also runs `forecasts run` once a day, after its trading steps. From 16:20 the after-close tick runs `notify summary` before `notify send`, so the day's summary goes out once. The market clock gates every step and anything but "open" runs nothing. Only existing CLI commands run; the policy engine still judges every proposal. | [Code] |
+| Scheduler, `ops/launchd` | two launchd jobs on the Mac: a brain cycle at 10:00, 11:30, 13:30 and 15:00 New York time on weekdays (brain once, policy evaluate, orders tick, notify send), and an orders tick every 5 minutes in market hours. The 15:00 cycle also runs `forecasts run` once a day, after its trading steps. From 16:20 the after-close tick runs `notify summary` before `notify send`, so the day's summary goes out once; after the close the tick keeps syncing and running `notify send` until 17:00, so a failed send is retried. The market clock gates every step and anything but "open" runs nothing. Only existing CLI commands run; the policy engine still judges every proposal. | [Code] |
 | Scheduler daemon (Phase 9) | not built; the launchd jobs stand in for it | [Code] |
 
 ## Safety defaults [Code]
@@ -116,7 +116,8 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 
 Merged pull requests, newest first (`git log --merges main`). Git history is the full record.
 
-- (this PR) feat: approve orders from the phone over Tailscale (approval page, off by default)
+- (this PR) fix: the after-close tick keeps retrying sends until 17:00
+- #32 feat: approve orders from the phone over Tailscale (approval page, off by default)
 - #31 feat: Discord feed shows longer theses, never exceeds 2,000 characters, and attaches a daily recap chart (adds matplotlib)
 - #29 test: keep tests offline and on the shipped signals block when a local config.yaml turns signals on
 - #27 feat: news and Reddit-mention signals for the scan stage, off by default
