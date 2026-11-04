@@ -220,6 +220,22 @@ notify:
   summary:
     expected_cycles: 4           # brain cycles the launchd schedule fires on a trading day (ops/launchd/local.aegis.cycle.plist); fewer is reported as a problem
 
+# The phone approval page (aegis/approve_web): answer an approval from the
+# ntfy alert's Review button instead of SSH. It listens on 127.0.0.1 only;
+# `tailscale serve` publishes it to your tailnet (never Funnel) and tells it
+# who is calling. To answer you need all three: a device on your tailnet, the
+# Tailscale login in APPROVE_WEB_LOGIN, and the PIN. It only records your yes
+# or no through the same code as `orders approve`; the tick still re-checks
+# the proposal on fresh data and places it. The URL, the login and the PIN's
+# hash live in .env, never here. docs/approve_web/SETUP.md is the setup.
+approve_web:
+  enabled: false                 # off until Tailscale, `tailscale serve` and the .env values are set on the mini; `approve-web serve` refuses while false, and alerts carry no Review link
+  port: 8765                     # the loopback port `tailscale serve` forwards to; nothing else can reach it
+  responder: ayush               # the name your phone answers are recorded under (approvals.responder), like `--by ayush`; the Tailscale login is checked, never stored or pushed
+  form_ttl_seconds: 300          # a page's one time form token is good for 5 minutes; reload the page for a new one
+  max_pin_failures: 5            # this many wrong PINs in a row locks the page until `approve-web unlock` on the mini; each one is a warning event, so it reaches your phone
+  request_timeout_seconds: 10    # a request that has not arrived whole in 10 s is dropped
+
 # The friends' feed (aegis/notify/feed.py): a one-way Discord channel where
 # friends can watch what the paper account does. It is a second audience
 # next to notify (which is yours) and shares nothing with it: each post is

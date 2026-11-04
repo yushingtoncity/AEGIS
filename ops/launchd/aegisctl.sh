@@ -7,6 +7,8 @@
 #   aegisctl.sh resume    load both jobs again
 #   aegisctl.sh remove    unload both jobs and delete their plists
 #   aegisctl.sh status    what launchd has loaded, and the last log lines
+#   aegisctl.sh approve-web-install   load the phone approval page job on its own
+#   aegisctl.sh approve-web-remove    unload it and delete its plist
 
 set -u
 
@@ -16,6 +18,7 @@ AGENTS="$HOME/Library/LaunchAgents"
 LOG_DIR="$HOME/Library/Logs/AEGIS"
 DOMAIN="gui/$(id -u)"
 JOBS="local.aegis.cycle local.aegis.tick"
+WEB_JOB="local.aegis.approve-web"   # opt in, never part of JOBS: see docs/approve_web/SETUP.md
 
 die() { echo "aegisctl: $*" >&2; exit 1; }
 
@@ -53,8 +56,27 @@ install_jobs() {
   echo "logs: $LOG_DIR"
 }
 
+install_web() {
+  [ -x "$AEGIS_HOME/.venv/bin/python" ] || die "no $AEGIS_HOME/.venv/bin/python"
+  case "$AEGIS_HOME$LOG_DIR" in
+    *"|"*) die "a path holds '|'" ;;
+  esac
+  mkdir -p "$AGENTS" "$LOG_DIR"
+  launchctl bootout "$DOMAIN/$WEB_JOB" 2>/dev/null
+  sed -e "s|__AEGIS_HOME__|$AEGIS_HOME|g" -e "s|__LOG_DIR__|$LOG_DIR|g" \
+    "$HERE/$WEB_JOB.plist" > "$AGENTS/$WEB_JOB.plist"
+  plutil -lint "$AGENTS/$WEB_JOB.plist" > /dev/null || die "$WEB_JOB.plist does not parse"
+  launchctl bootstrap "$DOMAIN" "$AGENTS/$WEB_JOB.plist" || die "could not load $WEB_JOB"
+  echo "loaded $WEB_JOB; log: $LOG_DIR/approve-web.log"
+}
+
 case "${1:-}" in
   install) install_jobs ;;
+  approve-web-install) install_web ;;
+  approve-web-remove)
+    launchctl bootout "$DOMAIN/$WEB_JOB" 2>/dev/null && echo "unloaded $WEB_JOB"
+    rm -f "$AGENTS/$WEB_JOB.plist"
+    ;;
   pause) unload ;;
   resume) load ;;
   remove)
@@ -64,11 +86,11 @@ case "${1:-}" in
     ;;
   status)
     launchctl list | grep -E 'local\.aegis\.' || echo "no AEGIS job is loaded"
-    for log in cycle tick; do
+    for log in cycle tick approve-web; do
       [ -f "$LOG_DIR/$log.log" ] || continue
       echo "--- $log.log"
       tail -n 5 "$LOG_DIR/$log.log"
     done
     ;;
-  *) echo "usage: aegisctl.sh {install|pause|resume|remove|status}" >&2; exit 64 ;;
+  *) echo "usage: aegisctl.sh {install|pause|resume|remove|status|approve-web-install|approve-web-remove}" >&2; exit 64 ;;
 esac
