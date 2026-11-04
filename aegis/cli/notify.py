@@ -47,12 +47,13 @@ posts them and needs ``feed.enabled: true``. ``feed-test`` posts one fixed
 message and touches no database. ``feed-recap`` writes the day's
 ``feed_recap`` event (at most one per New York day) for the next
 ``feed-send``; like ``summary`` it reads the paper account once and keeps
-only the day's change. With ``--if-enabled``, ``feed-send`` and
+only the day's change, and reads ``feed.benchmark``'s daily bars once for
+its change on the day (a failed read leaves it out). With ``--if-enabled``, ``feed-send`` and
 ``feed-recap`` exit 0 and do nothing while ``feed.enabled`` is false, which
 is how the launchd runner calls them.
 
-``main(argv, *, channel_factory=None, feed_channel_factory=None, clock=None, account_reader=None)``:
-tests inject stand-in channels and a fixed clock.
+``main(argv, *, channel_factory=None, feed_channel_factory=None, clock=None, account_reader=None, benchmark_reader=None)``:
+tests inject stand-in channels, a fixed clock and stand-in readers.
 """
 
 from __future__ import annotations
@@ -82,7 +83,7 @@ from aegis.notify.errors import NotifyError
 from aegis.notify.models import Notice
 from aegis.notify import discord
 from aegis.notify.channels import channel_from_env
-from aegis.notify.feed import already_recapped, feed_outbox, recap_event, send_feed
+from aegis.notify.feed import FeedChannel, already_recapped, feed_outbox, recap_event, send_feed
 from aegis.notify.outbox import Channel, outbox, send_due
 from aegis.notify.summary import (
     already_summarized,
@@ -97,8 +98,13 @@ from aegis.store.models import EventLevel
 from aegis.store.repo import log_event
 
 ChannelFactory = Callable[[NotifyConfig], Channel]
-FeedChannelFactory = Callable[[FeedConfig], Channel]
+FeedChannelFactory = Callable[[FeedConfig], "Channel | FeedChannel"]
 AccountReader = Callable[[], AccountState]
+BenchmarkReader = Callable[[str, date], "float | None"]
+"""The benchmark's close-to-close change on a New York day, in percent."""
+BENCHMARK_LOOKBACK_DAYS = 10
+"""Calendar days of daily bars read for the benchmark: enough to hold the
+day and the session before it across a long weekend or holiday."""
 
 NO_EVENTS = "there are no events in it"
 TEST_EVENT_ID = "test"
@@ -223,8 +229,10 @@ def _feed_test(config: AegisConfig, factory: FeedChannelFactory, now: datetime) 
 def _feed_recap(
     args: argparse.Namespace,
     db_path: Path,
+    config: AegisConfig,
     now: datetime,
     account_reader: AccountReader | None,
+    benchmark_reader: BenchmarkReader | None,
 ) -> int:
     day = args.day if args.day is not None else new_york_day(now)
     if args.dry_run:
@@ -238,7 +246,11 @@ def _feed_recap(
             print(f"the feed recap for {day.isoformat()} was already written")
             return 0
         account, _ = _read_account(account_reader)  # a failed read: the recap says "not available"
-        event = recap_event(conn, day, account, now)
+        symbol = config.feed.benchmark
+        event = recap_event(
+            conn, day, account, now,
+            benchmark=symbol, benchmark_pct=_read_benchmark(benchmark_reader, symbol, day),
+        )
         if not args.dry_run:
             log_event(conn, event)
     finally:
@@ -247,6 +259,27 @@ def _feed_recap(
     if not args.dry_run:
         print("written as a feed_recap event; the next `notify feed-send` posts it")
     return 0
+
+
+def benchmark_change(symbol: str, day: date) -> float | None:
+    """``symbol``'s change on ``day`` from its daily bars (split and dividend
+    adjusted): the day's close against the session before. None when the
+    day has no bar yet (a holiday, or bars not published)."""
+    from aegis.data.market import get_bars  # the data client loads only here
+
+    bars = get_bars(symbol, "1Day", lookback_days=BENCHMARK_LOOKBACK_DAYS, adjustment="all")
+    for before, bar in zip(bars, bars[1:]):
+        if new_york_day(bar.timestamp) == day and before.close > 0:
+            return (bar.close / before.close - 1) * 100
+    return None
+
+
+def _read_benchmark(reader: BenchmarkReader | None, symbol: str, day: date) -> float | None:
+    """The benchmark's change, or None on any failure: the recap goes out without it."""
+    try:
+        return (reader or benchmark_change)(symbol, day)
+    except Exception:  # any failure: the comparison is a nicety, never a reason to fail
+        return None
 
 
 def _read_account(reader: AccountReader | None) -> tuple[AccountState | None, str | None]:
@@ -352,6 +385,7 @@ def main(
     feed_channel_factory: FeedChannelFactory | None = None,
     clock: Callable[[], datetime] | None = None,
     account_reader: AccountReader | None = None,
+    benchmark_reader: BenchmarkReader | None = None,
 ) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="backslashreplace")
@@ -381,7 +415,7 @@ def main(
         if args.command == "feed-send":
             return _feed_send(db_path, config, feed_factory, now_of)
         if args.command == "feed-recap":
-            return _feed_recap(args, db_path, now_of(), account_reader)
+            return _feed_recap(args, db_path, config, now_of(), account_reader, benchmark_reader)
         if args.command == "summary":
             return _summary(args, db_path, config, now_of(), account_reader)
         if args.command == "pending":

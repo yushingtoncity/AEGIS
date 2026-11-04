@@ -17,7 +17,11 @@ Three kinds of post, each switched on in ``feed.posts``:
   status is ``filled``. Which ticker was bought or sold.
 - ``recap``: the ``feed_recap`` event ``notify feed-recap`` writes after
   the close, at most one per New York day. Counts of cycles, proposals and
-  fills, and the account's change on the day in percent.
+  fills, the account's change on the day in percent and the benchmark's
+  (``feed.benchmark``). With ``feed.chart_days`` above 0 it carries a PNG
+  chart (``aegis.notify.chart``) of the account's running change against
+  the benchmark's, chained from the recaps of those days; a chart that
+  cannot be drawn leaves the recap as text.
 
 Share counts, prices and dollar amounts are added only with
 ``feed.show_amounts``. Equity and positions are never posted.
@@ -36,12 +40,13 @@ from __future__ import annotations
 import sqlite3
 import unicodedata
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Protocol
 
 from aegis.config import FeedConfig
 from aegis.data.models import AccountState
+from aegis.notify import chart
 from aegis.notify.errors import NotifyError
 from aegis.notify.models import BODY_MAX, TITLE_MAX, Notice
 from aegis.notify.outbox import NOTIFY_FAILED, NOTIFY_SENT, Channel
@@ -62,6 +67,8 @@ CYCLE_END_KIND = "cycle_end"
 FILL_KINDS = frozenset({"order_submitted", "order_updated"})
 """The dispatcher's kinds (``dispatch.ORDER_SUBMITTED`` / ``ORDER_UPDATED``),
 spelled here rather than imported so the feed needs nothing from the order path."""
+DISCLAIMER_TEXT = "Paper account. Not investment advice."
+"""Printed on the chart too; kept equal to ``discord.DISCLAIMER`` (a test checks)."""
 FILLED = "filled"
 """The broker's word for an order done in full; a partial fill is not posted."""
 
@@ -95,10 +102,23 @@ def _plural(count: int, word: str) -> str:
 
 @dataclass(frozen=True)
 class Post:
-    """One post due, and the key that says what it tells about."""
+    """One post due, the key that says what it tells about, and an image
+    to attach (only a recap carries one)."""
 
     key: str
     notice: Notice
+    image: bytes | None = None
+    chart_for: tuple[date, str] | None = None
+    """A recap's day and benchmark: ``feed_outbox`` draws its chart only for
+    a recap it is about to hand out, never for one already posted."""
+
+
+class FeedChannel(Protocol):
+    """Where feed posts go: a ``Channel`` that can also attach one image."""
+
+    name: str
+
+    def send(self, notice: Notice, image: bytes | None = None) -> None: ...
 
 
 def _notice(event: Event, title: str, body: str) -> Notice:
@@ -189,7 +209,15 @@ def _fill_body(order: Order, payload: dict[str, Any], config: FeedConfig) -> str
     return line
 
 
-def _recap_post(event: Event, config: FeedConfig) -> Post | None:
+def _change_words(pct: float) -> str:
+    return "flat" if round(pct, 2) == 0 else f"{'up' if pct > 0 else 'down'} {abs(pct):.2f}%"
+
+
+def _pct(value: object) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _recap_post(conn: sqlite3.Connection, event: Event, config: FeedConfig) -> Post | None:
     payload = event.payload or {}
     day = payload.get("day")
     if not isinstance(day, str):
@@ -203,16 +231,62 @@ def _recap_post(event: Event, config: FeedConfig) -> Post | None:
         for name, word in (("cycles", "brain cycle"), ("proposals", "proposal"), ("fills", "fill"))
     ]
     lines = [", ".join(counts) + "."]
-    pct, usd = payload.get("change_pct"), payload.get("change_usd")
-    if isinstance(pct, (int, float)):
-        change = "flat" if round(pct, 2) == 0 else f"{'up' if pct > 0 else 'down'} {abs(pct):.2f}%"
+    pct, usd = _pct(payload.get("change_pct")), payload.get("change_usd")
+    if pct is not None:
+        change = _change_words(pct)
         if config.show_amounts and isinstance(usd, (int, float)) and round(pct, 2) != 0:
             change += f" ({_money(usd)})"
         lines.append(f"Paper account: {change} today.")
     else:
         lines.append("Paper account change: not available today.")
+    bench = _pct(payload.get("benchmark_change_pct"))
+    symbol = _symbol(str(payload.get("benchmark") or config.benchmark))
+    if bench is not None:
+        lines.append(f"{symbol} for comparison: {_change_words(bench)} today.")
     title = f"AEGIS day recap, {label.strftime('%a %b')} {label.day}"
-    return Post(f"recap:{day}", _notice(event, title, "\n".join(lines)))
+    return Post(f"recap:{day}", _notice(event, title, "\n".join(lines)), chart_for=(label, symbol))
+
+
+def recap_days(conn: sqlite3.Connection, day: date, window_days: int) -> list[chart.DayChange]:
+    """The recaps of the ``window_days`` calendar days ending on ``day``,
+    oldest first, one per New York day (the first written wins)."""
+    start, _ = day_bounds(day - timedelta(days=window_days - 1))
+    found: dict[date, chart.DayChange] = {}
+    for record in get_events_since(conn, start - timedelta(days=1), kind=FEED_RECAP):
+        payload = record.payload or {}
+        try:
+            when = date.fromisoformat(str(payload.get("day")))
+        except ValueError:
+            continue
+        if when > day or (day - when).days >= window_days or when in found:
+            continue
+        found[when] = chart.DayChange(
+            when, _pct(payload.get("change_pct")), _pct(payload.get("benchmark_change_pct"))
+        )
+    return [found[d] for d in sorted(found)]
+
+
+def _with_chart(conn: sqlite3.Connection, post: Post, config: FeedConfig) -> Post:
+    if post.chart_for is None:
+        return post
+    day, benchmark = post.chart_for
+    return replace(post, image=_recap_chart(conn, day, config, benchmark))
+
+
+def _recap_chart(
+    conn: sqlite3.Connection, day: date, config: FeedConfig, benchmark: str
+) -> bytes | None:
+    """The recap's chart, or None when it is off, too short, or fails to draw.
+    A failed chart never stops the recap: the text goes out alone."""
+    if config.chart_days == 0:
+        return None
+    days = recap_days(conn, day, config.chart_days)
+    if not chart.drawable(days):
+        return None
+    try:
+        return chart.render_png(days, benchmark, DISCLAIMER_TEXT)
+    except Exception:  # matplotlib missing or a drawing error: post the text
+        return None
 
 
 def post_for(conn: sqlite3.Connection, event: Event, config: FeedConfig) -> Post | None:
@@ -224,7 +298,7 @@ def post_for(conn: sqlite3.Connection, event: Event, config: FeedConfig) -> Post
     if event.kind in FILL_KINDS and "fills" in config.posts:
         return _fill_post(conn, event, config)
     if event.kind == FEED_RECAP and "recap" in config.posts:
-        return _recap_post(event, config)
+        return _recap_post(conn, event, config)
     return None
 
 
@@ -278,7 +352,7 @@ def feed_outbox(
             given_up += 1
             continue
         due.append(post)
-    taken = due[: config.max_per_run]
+    taken = [_with_chart(conn, post, config) for post in due[: config.max_per_run]]
     return FeedOutbox(
         posts=tuple(taken), waiting=len(due) - len(taken), given_up=given_up, failures=failures
     )
@@ -301,7 +375,7 @@ def _record(now: datetime, level: EventLevel, kind: str, message: str, **payload
 
 
 def send_feed(
-    conn: sqlite3.Connection, config: FeedConfig, channel: Channel, clock: Clock
+    conn: sqlite3.Connection, config: FeedConfig, channel: Channel | FeedChannel, clock: Clock
 ) -> FeedReport:
     """Post everything due now, oldest first, and record each attempt.
 
@@ -318,7 +392,10 @@ def send_feed(
         attempt = due.failures.get(post.key, 0) + 1
         common = dict(event_id=notice.event_id, key=post.key, channel=channel.name, attempt=attempt)
         try:
-            channel.send(notice)
+            if post.image is None:
+                channel.send(notice)
+            else:
+                channel.send(notice, image=post.image)
         except NotifyError as exc:
             failed += 1
             log_event(conn, _record(
@@ -363,10 +440,17 @@ def day_change(account: AccountState | None) -> tuple[float | None, float | None
 
 
 def recap_event(
-    conn: sqlite3.Connection, day: date, account: AccountState | None, now: datetime
+    conn: sqlite3.Connection,
+    day: date,
+    account: AccountState | None,
+    now: datetime,
+    *,
+    benchmark: str | None = None,
+    benchmark_pct: float | None = None,
 ) -> Event:
-    """The ``feed_recap`` event for ``day``: the counts read from the store
-    and the account's change. Writes nothing; the caller logs it."""
+    """The ``feed_recap`` event for ``day``: the counts read from the store,
+    the account's change and the benchmark's (None when not available).
+    Writes nothing; the caller logs it."""
     start, end = day_bounds(day)
     events = [e for e in get_events_since(conn, start) if e.occurred_at < end]
     cycles = sum(1 for e in events if e.kind == CYCLE_END_KIND)
@@ -387,5 +471,6 @@ def recap_event(
         payload={
             "day": day.isoformat(), "cycles": cycles, "proposals": proposals, "fills": fills,
             "change_pct": pct, "change_usd": usd,
+            "benchmark": benchmark, "benchmark_change_pct": benchmark_pct,
         },
     )

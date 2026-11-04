@@ -19,10 +19,16 @@ output: ``allowed_mentions`` is empty, so nothing pings anyone (not even
 ``@everyone``); link previews are suppressed; and Discord's markdown
 characters in the stored text are escaped, so it cannot dress up a link.
 Every post ends with ``DISCLAIMER``.
+
+A post fits Discord's ``CONTENT_MAX`` characters even after escaping
+(which adds a backslash per markdown character): a body that would not is
+cut, never refused by Discord. A post can carry one PNG (the recap's
+chart), sent as a multipart upload in the same single request.
 """
 
 from __future__ import annotations
 
+import json
 import re
 from urllib.parse import urlsplit
 
@@ -40,7 +46,16 @@ DISCORD_HOSTS = frozenset({"discord.com", "discordapp.com", "ptb.discord.com", "
 WEBHOOK_PATH = "/api/webhooks/"
 DISCLAIMER = "Paper account. Not investment advice."
 SUPPRESS_EMBEDS = 1 << 2
-"""Discord's message flag that turns off link previews."""
+"""Discord's message flag that turns off link previews (an attached image
+still shows: it is an attachment, not an embed)."""
+CONTENT_MAX = 2000
+"""Discord's limit on a message's ``content``, in characters; over it the
+whole post is refused with HTTP 400."""
+IMAGE_MAX_BYTES = 8 * 1024 * 1024
+"""Largest image sent, under Discord's smallest upload limit (10 MiB). The
+recap's chart is a few tens of kilobytes; a bigger one means something is
+wrong, so the post goes out without it."""
+IMAGE_FILENAME = "aegis-recap.png"
 
 _MARKDOWN = re.compile(r"([\\*_~`|>#\[\]()<])")
 _LINE_START = re.compile(r"^(\s*)([-+]|\d+\.)(?=\s)")
@@ -75,9 +90,25 @@ def escape(text: str) -> str:
 
 
 def content_for(notice: Notice) -> str:
-    """The message text: the title in bold, the body, the disclaimer in small print."""
-    lines = [escape(line) for line in notice.body.splitlines()]
-    return f"**{escape(notice.title)}**\n" + "\n".join(lines) + f"\n-# {DISCLAIMER}"
+    """The message text: the title in bold, the body, the disclaimer in small
+    print, never over ``CONTENT_MAX`` characters (the body is cut to fit)."""
+    head = f"**{escape(notice.title)}**\n"
+    tail = f"\n-# {DISCLAIMER}"
+    body = "\n".join(escape(line) for line in notice.body.splitlines())
+    room = CONTENT_MAX - len(head) - len(tail)
+    if len(body) > room:
+        body = _cut_escaped(body, room - 3) + "..."
+    return head + body + tail
+
+
+def _cut_escaped(text: str, limit: int) -> str:
+    """``text`` cut to ``limit`` characters without leaving a lone escape
+    backslash at the end, which would escape the "..." after it."""
+    cut = text[: max(limit, 0)]
+    trailing = len(cut) - len(cut.rstrip("\\"))
+    if trailing % 2:
+        cut = cut[:-1]
+    return cut.rstrip()
 
 
 class DiscordChannel:
@@ -95,15 +126,24 @@ class DiscordChannel:
     def __repr__(self) -> str:  # never the URL
         return "DiscordChannel()"
 
-    def send(self, notice: Notice) -> None:
-        payload = {
+    def send(self, notice: Notice, image: bytes | None = None) -> None:
+        """Post ``notice``, with ``image`` (PNG bytes) attached when given and
+        not over ``IMAGE_MAX_BYTES``; an oversized image is left off."""
+        payload: dict = {
             "content": content_for(notice),
             "allowed_mentions": {"parse": []},
             "flags": SUPPRESS_EMBEDS,
         }
+        request: dict = {"json": payload}
+        if image is not None and 0 < len(image) <= IMAGE_MAX_BYTES:
+            payload["attachments"] = [{"id": 0, "filename": IMAGE_FILENAME}]
+            request = {
+                "data": {"payload_json": json.dumps(payload)},
+                "files": {"files[0]": (IMAGE_FILENAME, image, "image/png")},
+            }
         try:
             response = self._session.post(
-                self._url, json=payload, timeout=self._timeout, allow_redirects=False
+                self._url, **request, timeout=self._timeout, allow_redirects=False
             )
         except requests.RequestException as exc:
             raise NotifyError("post to Discord", notice.event_id, cause=exc) from None
