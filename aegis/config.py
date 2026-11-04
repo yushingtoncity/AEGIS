@@ -410,7 +410,9 @@ class FeedConfig(BaseModel):
     enabled: StrictBool = False
     show_amounts: StrictBool = False
     posts: tuple[FeedPost, ...] = ("proposals", "fills", "recap")
-    thesis_chars: int = Field(default=280, ge=0, le=1000)
+    thesis_chars: int = Field(default=800, ge=0, le=1000)
+    chart_days: int = Field(default=30, ge=0, le=366)
+    benchmark: str = Field(default="SPY", min_length=1, max_length=12, pattern=r"^[A-Z][A-Z.]*$")
     timeout_seconds: float = Field(default=10.0, gt=0)
     lookback_minutes: float = Field(default=60.0, gt=0)
     max_attempts: int = Field(default=3, ge=1)
