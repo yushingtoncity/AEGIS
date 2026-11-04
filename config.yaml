@@ -236,7 +236,9 @@ feed:
     - proposals                  # a proposal the brain wrote: ticker, direction, confidence and a cut of the thesis (before the risk gate judges it)
     - fills                      # an order the broker reports fully filled
     - recap                      # the after-close recap `notify feed-recap` writes (one a day)
-  thesis_chars: 280              # characters of the model's thesis shown with a proposal; 0 leaves it out. About two lines in Discord
+  thesis_chars: 800              # characters of the model's thesis shown with a proposal; 0 leaves it out. 800 shows most theses whole (was 280, which cut them mid sentence); the post stays under Discord's 2,000 character limit
+  chart_days: 30                 # calendar days of recaps the recap's chart covers (about 20 trading days); 0 posts the recap as text only. Percent only, never dollars
+  benchmark: SPY                 # drawn next to the account on the chart and named in the recap, so a day's change has something to be compared with
   timeout_seconds: 10            # per post: one small POST; a stuck send must not hang a tick
   lookback_minutes: 60           # events older than this are never posted: a first run (or one after an outage) does not replay history
   max_attempts: 3                # a post that failed this many times is given up on (each failure is a notify_failed event)

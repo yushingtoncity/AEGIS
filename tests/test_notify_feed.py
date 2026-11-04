@@ -47,7 +47,7 @@ NOW = datetime.combine(DAY, time(16, 21), tzinfo=NEW_YORK).astimezone(timezone.u
 ON = FeedConfig(enabled=True)
 WEBHOOK = "https://discord.com/api/webhooks/123456/s3cret-token"
 SECRET = "s3cret"
-THESIS = "Data-center demand is accelerating and guidance looks conservative. " * 10
+THESIS = "Data-center demand is accelerating and guidance looks conservative. " * 15
 
 
 @pytest.fixture
@@ -101,11 +101,13 @@ class FakeChannel:
         self.name = discord.CHANNEL_NAME
         self.failing = set(failing)
         self.sent: list[Notice] = []
+        self.images: list[bytes | None] = []
 
-    def send(self, notice):
+    def send(self, notice, image=None):
         if notice.event_id in self.failing:
             raise NotifyError("post to Discord", notice.event_id, detail="HTTP 429")
         self.sent.append(notice)
+        self.images.append(image)
 
 
 def _account(**overrides) -> AccountState:
@@ -126,12 +128,15 @@ class TestConfig:
     def test_defaults(self):
         config = FeedConfig()
         assert config.posts == ("proposals", "fills", "recap")
-        assert (config.thesis_chars, config.max_attempts, config.max_per_run) == (280, 3, 10)
+        assert (config.thesis_chars, config.max_attempts, config.max_per_run) == (800, 3, 10)
+        assert (config.chart_days, config.benchmark) == (30, "SPY")
 
     @pytest.mark.parametrize("bad", [
         {"enabled": "yes"}, {"enabled": 1}, {"show_amounts": "true"}, {"posts": ["trades"]},
         {"thesis_chars": -1}, {"thesis_chars": 5000}, {"max_attempts": 0}, {"max_per_run": 0},
         {"lookback_minutes": 0}, {"timeout_seconds": 0}, {"webhook_url": WEBHOOK},
+        {"chart_days": -1}, {"chart_days": 400}, {"benchmark": ""}, {"benchmark": "spy"},
+        {"benchmark": "SPY; rm"},
     ])
     def test_refused(self, bad):
         with pytest.raises(ValueError):
@@ -445,11 +450,15 @@ def store(tmp_path, monkeypatch):
     return path
 
 
-def _run(argv, config, monkeypatch, channel=None, account=None):
+def _no_benchmark(symbol, day):
+    raise RuntimeError("no bars in tests")
+
+
+def _run(argv, config, monkeypatch, channel=None, account=None, benchmark=_no_benchmark):
     monkeypatch.setattr(cli, "get_config", lambda: config)
     reader = (lambda: account) if account is not None else (lambda: (_ for _ in ()).throw(RuntimeError("down")))
     return cli.main(argv, feed_channel_factory=lambda _: channel or FakeChannel(), clock=_clock,
-                    account_reader=reader)
+                    account_reader=reader, benchmark_reader=benchmark)
 
 
 class TestCli:
