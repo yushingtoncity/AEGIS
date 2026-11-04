@@ -86,6 +86,13 @@ class NtfyChannel:
         }
         if notice.tags:
             headers["Tags"] = _ascii(",".join(notice.tags))
+        if notice.link:
+            # The approval page: a tap on the push, or its Review button,
+            # opens it. The link is no secret (the page needs the tailnet,
+            # the login and the PIN); Notice already holds it to https with
+            # no separator ntfy's Actions header would split on.
+            headers["Click"] = _ascii(notice.link)
+            headers["Actions"] = f"view, Review, {_ascii(notice.link)}, clear=true"
         if self._token:
             headers["Authorization"] = f"Bearer {self._token}"
         return headers

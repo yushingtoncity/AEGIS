@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- The phone approval page (aegis/approve_web), kept up by launchd. It
+       listens on 127.0.0.1 only; `tailscale serve` publishes it to the
+       tailnet. Not loaded by `aegisctl.sh install`: load it on its own with
+       `aegisctl.sh approve-web-install` once docs/approve_web/SETUP.md is
+       done. It refuses to start while approve_web.enabled is false. -->
+  <key>Label</key>
+  <string>local.aegis.approve-web</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__AEGIS_HOME__/.venv/bin/python</string>
+    <string>-m</string>
+    <string>aegis.cli.approve_web</string>
+    <string>serve</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__AEGIS_HOME__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/approve-web.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/approve-web.log</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- Restart it if it stops, but not in a tight loop: a page that refuses
+       to start (switched off, .env incomplete) is retried every 60 s. -->
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+</dict>
+</plist>

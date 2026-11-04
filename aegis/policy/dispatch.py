@@ -126,6 +126,11 @@ ContextBuilder = Callable[..., PolicyContext]
 
 APPROVAL_CHANNEL = "cli"
 """The ``channel`` of an answer given through ``orders approve`` / ``reject``."""
+PHONE_CHANNEL = "phone"
+"""The ``channel`` of an answer given on the approval page (``aegis.approve_web``)."""
+APPROVAL_CHANNELS = frozenset({APPROVAL_CHANNEL, PHONE_CHANNEL})
+"""Every way a human answer may arrive. Fixed, not config: a new way to say
+yes is a change to how execution approval works, so it is a code change."""
 
 # Event kinds, one per thing that can happen to an order.
 APPROVAL_ANSWERED = "approval_answered"
@@ -546,13 +551,17 @@ def answer(
     by: str,
     config: AegisConfig,
     note: str | None = None,
+    channel: str = APPROVAL_CHANNEL,
     clock: Clock = wall_clock,
 ) -> Approval:
     """A human's answer to one NEEDS_APPROVAL verdict (D7): written once,
     tied to that decision; an approval is good for
     ``broker.approval_ttl_seconds``. It places nothing: ``place`` does, and
-    re-checks the proposal first either way."""
+    re-checks the proposal first either way. ``channel`` records how the
+    answer arrived, one of ``APPROVAL_CHANNELS``."""
     what = "approve" if approved else "reject"
+    if channel not in APPROVAL_CHANNELS:
+        raise PlacementError(f"{what} (unknown answer channel {_one_line(channel)!r})", decision_id)
     responder = _one_line(by)
     if not responder:
         raise PlacementError(f"{what} (say who answers: --by NAME)", decision_id)
@@ -592,7 +601,7 @@ def answer(
             requested_at=decision.decided_at,
             responded_at=now,
             response=response,
-            channel=APPROVAL_CHANNEL,
+            channel=channel,
             responder=responder,
             decision_id=decision.id,
             expires_at=expires_at,
@@ -602,7 +611,7 @@ def answer(
             now, EventLevel.INFO, APPROVAL_ANSWERED,
             f"decision {decision.id} ({decision.proposal_id}): {response.value} by {responder}",
             decision_id=decision.id, proposal_id=decision.proposal_id, response=response.value,
-            responder=responder,
+            responder=responder, channel=channel,
             expires_at=None if expires_at is None else expires_at.isoformat(),
         ),
     )

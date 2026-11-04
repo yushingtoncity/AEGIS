@@ -272,3 +272,18 @@ def test_the_tick_runs_every_five_minutes() -> None:
     job = _job("local.aegis.tick")
     assert job["StartInterval"] == 300
     assert "StartCalendarInterval" not in job
+
+
+def test_the_approval_page_job_is_kept_up_and_runs_only_its_serve_command() -> None:
+    job = _job("local.aegis.approve-web")
+    assert job["Label"] == "local.aegis.approve-web"
+    assert job["ProgramArguments"] == [
+        "__AEGIS_HOME__/.venv/bin/python", "-m", "aegis.cli.approve_web", "serve"]
+    assert job["RunAtLoad"] is True and job["KeepAlive"] is True
+    assert job["ThrottleInterval"] >= 60
+    assert "StartInterval" not in job and "StartCalendarInterval" not in job
+
+
+def test_install_never_loads_the_approval_page() -> None:
+    text = (LAUNCHD / "aegisctl.sh").read_text(encoding="utf-8")
+    assert 'JOBS="local.aegis.cycle local.aegis.tick"' in text

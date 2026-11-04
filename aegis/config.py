@@ -419,6 +419,29 @@ class FeedConfig(BaseModel):
     max_per_run: int = Field(default=10, ge=1)
 
 
+class ApproveWebConfig(BaseModel):
+    """The phone approval page (``aegis.approve_web``): answer a
+    NEEDS_APPROVAL verdict from the phone, over Tailscale.
+
+    Shipped with ``enabled: false``. The page listens on the loopback
+    address only; ``tailscale serve`` publishes it to the operator's tailnet
+    and adds the caller's identity. Its URL, the one Tailscale login allowed
+    to answer, and the PIN's hash live in .env (``APPROVE_WEB_URL``,
+    ``APPROVE_WEB_LOGIN``, ``APPROVE_WEB_PIN_HASH``), never here. It can
+    only record an answer through ``dispatch.answer``: the tick still
+    re-checks and places, and nothing here changes what may be traded.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+
+    enabled: StrictBool = False
+    port: int = Field(default=8765, ge=1024, le=65535)
+    responder: str = Field(default="ayush", min_length=1, max_length=40, pattern=r"^[A-Za-z0-9_.-]+$")
+    form_ttl_seconds: float = Field(default=300.0, gt=0, le=900)
+    max_pin_failures: int = Field(default=5, ge=1, le=10)
+    request_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+
+
 class ScorecardConfig(BaseModel):
     """How the read-only proposal scorecard grades past proposals.
 
@@ -606,6 +629,7 @@ class AegisConfig(BaseModel):
     broker: BrokerConfig = BrokerConfig()
     notify: NotifyConfig = NotifyConfig()
     feed: FeedConfig = FeedConfig()
+    approve_web: ApproveWebConfig = ApproveWebConfig()
     scorecard: ScorecardConfig = ScorecardConfig()
     forecast: ForecastConfig = ForecastConfig()
     signals: SignalsConfig = SignalsConfig()

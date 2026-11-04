@@ -84,3 +84,18 @@ hours with someone at the screen to click Allow.
 To stop trading but keep the schedule, use `python -m aegis.cli.policy kill
 on` then `python -m aegis.cli.orders stand-down`, or set `broker.enabled:
 false`. Cycles keep recording proposals, but nothing is placed.
+
+## The phone approval page (optional third job)
+
+`local.aegis.approve-web` keeps the phone approval page running
+(`python -m aegis.cli.approve_web serve`, on 127.0.0.1 only). It is never
+part of `install`, `pause`, `resume` or `remove`; it has its own commands:
+
+```
+ops/launchd/aegisctl.sh approve-web-install
+ops/launchd/aegisctl.sh approve-web-remove
+```
+
+Do docs/approve_web/SETUP.md first. The page refuses to start while
+`approve_web.enabled` is false or its .env values are missing, and launchd
+retries it every 60 seconds; its log is `approve-web.log` in the same folder.

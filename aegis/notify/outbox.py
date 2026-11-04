@@ -22,6 +22,7 @@ duplicate push, never a lost one.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import unicodedata
 from collections.abc import Callable, Sequence
@@ -81,6 +82,8 @@ _MULTILINE_KINDS = frozenset({"daily_summary"})
 line is cleaned on its own and the breaks are kept, so a phone shows a list."""
 _NEEDS_APPROVAL = "policy_needs_approval"
 _APPROVE_HINT = "Approve: python -m aegis.cli.orders approve {decision_id} --by NAME"
+_DECISION_ID = re.compile(r"[A-Za-z0-9-]{1,64}")
+"""What a decision id may look like in a link: the approval page takes no other."""
 _DECISION_ID_MAX = 64
 """A decision id is a uuid (36 characters); one longer than this is not one
 the CLI would take, and the hint is left off rather than letting it crowd
@@ -134,7 +137,17 @@ def _title(event: Event) -> str:
     return _cut(f"AEGIS {prefix}{label}", TITLE_MAX)
 
 
-def _body(event: Event) -> str:
+def review_link(event: Event, review_url: str | None) -> str | None:
+    """The approval page for a ``policy_needs_approval`` event, when the
+    page is set up (``review_url`` is its checked origin), else None."""
+    decision_id = (event.payload or {}).get("decision_id")
+    if (review_url is None or event.kind != _NEEDS_APPROVAL or not isinstance(decision_id, str)
+            or not _DECISION_ID.fullmatch(decision_id)):
+        return None
+    return f"{review_url}/d/{decision_id}"
+
+
+def _body(event: Event, link: str | None = None) -> str:
     if event.kind in _MULTILINE_KINDS:
         lines = [_one_line(line) for line in str(event.message).splitlines()]
         message = "\n".join(line for line in lines if line) or event.kind
@@ -145,18 +158,22 @@ def _body(event: Event) -> str:
     if (event.kind == _NEEDS_APPROVAL and isinstance(decision_id, str)
             and 0 < len(decision_id.strip()) <= _DECISION_ID_MAX):
         hint = "\n\n" + _APPROVE_HINT.format(decision_id=_one_line(decision_id))
+    if link is not None:
+        hint += f"\nReview: {link}"
     return _cut(message, BODY_MAX - len(hint)) + hint
 
 
-def notice_for(event: Event) -> Notice:
-    """The push that tells about ``event``."""
+def notice_for(event: Event, review_url: str | None = None) -> Notice:
+    """The push that tells about ``event``; an approval carries a link to
+    the approval page when ``review_url`` (its origin) is given."""
+    link = review_link(event, review_url)
     priority = _PRIORITY[event.level]
     tags = _TAGS.get(event.level, ())
     if event.kind == _NEEDS_APPROVAL:
         priority, tags = 4, ("bell",)  # an approval is only good for broker.approval_ttl_seconds
     return Notice(
         event_id=event.id, occurred_at=event.occurred_at, level=event.level, kind=event.kind,
-        title=_title(event), body=_body(event), priority=priority, tags=tags,
+        title=_title(event), body=_body(event, link), priority=priority, tags=tags, link=link,
     )
 
 
@@ -184,8 +201,12 @@ def _ids_in(records: Sequence[Event], channel: str) -> list[str]:
     return found
 
 
-def outbox(conn: sqlite3.Connection, config: NotifyConfig, channel: str, now: datetime) -> Outbox:
-    """Read what is due on ``channel`` at ``now`` (naive taken as UTC). Writes nothing."""
+def outbox(
+    conn: sqlite3.Connection, config: NotifyConfig, channel: str, now: datetime,
+    *, review_url: str | None = None,
+) -> Outbox:
+    """Read what is due on ``channel`` at ``now`` (naive taken as UTC). Writes
+    nothing. ``review_url`` is the approval page's origin, when it is set up."""
     now = _aware(now)
     since = now - timedelta(minutes=config.lookback_minutes)
     sent = set(_ids_in(get_events_since(conn, since, kind=NOTIFY_SENT), channel))
@@ -203,7 +224,7 @@ def outbox(conn: sqlite3.Connection, config: NotifyConfig, channel: str, now: da
         due.append(event)
     taken = due[: config.max_per_run]
     return Outbox(
-        notices=tuple(notice_for(event) for event in taken),
+        notices=tuple(notice_for(event, review_url) for event in taken),
         waiting=len(due) - len(taken),
         given_up=given_up,
         failures=failures,
@@ -234,7 +255,8 @@ def _record(now: datetime, level: EventLevel, kind: str, message: str, **payload
 
 
 def send_due(
-    conn: sqlite3.Connection, config: NotifyConfig, channel: Channel, clock: Clock
+    conn: sqlite3.Connection, config: NotifyConfig, channel: Channel, clock: Clock,
+    *, review_url: str | None = None,
 ) -> SendReport:
     """Send every notice due now, oldest first, and record each attempt.
 
@@ -244,7 +266,7 @@ def send_due(
     """
     if not config.enabled:
         raise NotifyError("send", detail="notify.enabled is false in config.yaml")
-    due = outbox(conn, config, channel.name, clock())
+    due = outbox(conn, config, channel.name, clock(), review_url=review_url)
     lines: list[str] = []
     sent = failed = 0
     for notice in due.notices:

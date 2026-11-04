@@ -77,7 +77,16 @@ from aegis.cli.policy import (
     _ts,
     _UsageError,
 )
-from aegis.config import AegisConfig, ConfigError, FeedConfig, NotifyConfig, get_config
+from aegis.approve_web.auth import URL_ENV, check_page_url
+from aegis.config import (
+    AegisConfig,
+    ConfigError,
+    FeedConfig,
+    NotifyConfig,
+    get_config,
+    load_env,
+    require_env,
+)
 from aegis.data.models import AccountState, utcnow
 from aegis.notify.errors import NotifyError
 from aegis.notify.models import Notice
@@ -139,6 +148,21 @@ def _pending(db_path: Path, config: AegisConfig, channel_name: str, now: datetim
     return 0
 
 
+def _review_url(config: AegisConfig) -> str | None:
+    """The approval page's origin for alerts' Review link: only while
+    ``approve_web.enabled`` is on and ``APPROVE_WEB_URL`` checks out. A
+    missing or bad URL only leaves the link off (the CLI hint stays), with
+    a note on stderr; it never stops a notice."""
+    if not config.approve_web.enabled:
+        return None
+    load_env()
+    try:
+        return check_page_url(require_env(URL_ENV))
+    except ConfigError as exc:
+        print(f"note: no Review link in alerts: {_clean(exc)}", file=sys.stderr)
+        return None
+
+
 def _send(
     db_path: Path, config: AegisConfig, factory: ChannelFactory, clock: Callable[[], datetime]
 ) -> int:
@@ -149,7 +173,7 @@ def _send(
     _require_schema(db_path)
     conn = open_store(db_path)
     try:
-        report = send_due(conn, config.notify, channel, clock)
+        report = send_due(conn, config.notify, channel, clock, review_url=_review_url(config))
     finally:
         conn.close()
     for line in report.lines or ("nothing to send",):
