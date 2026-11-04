@@ -2,7 +2,7 @@
 
 Code facts verified at main `1cadcc3` (merge of PR #15) on 2026-10-20.
 If main has moved past `1cadcc3` with changes outside docs/, re-check before relying on this file.
-Scheduler, environment, test and recent-change entries updated at main `5260f3b` (merge of PR #20) on 2026-10-22.
+Scheduler, environment, test and recent-change entries updated at main `5260f3b` (merge of PR #20) on 2026-10-22. Phone approval page entries added on 2026-11-04 on top of main `b5c3dff`.
 
 ## How to use this file
 
@@ -32,6 +32,7 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 | Proposal scorecard, `aegis/scorecard` and `aegis/cli/scorecard.py` | shipped, read-only. Since PR #22: adjusted closes, fresh entries only, 95% intervals, always-long and shuffled-direction baselines, Brier reference, estimated option P&L after theta and the spread. Since the forecast PR: confidence and Brier are scored only at the 5-session horizon and only for proposals written under `proposal-v2` or later | [Code] |
 | Forecast ledger, `aegis/forecasts`, `aegis/brain/forecast.py`, `aegis/cli/forecasts.py` | shipped, off by default (`forecast.enabled: false`); the 15:00 launchd cycle runs it, and it refuses while disabled. Once a trading day, a pinned primary model and a cheaper shadow model give each of 30 universe tickers a probability of beating SPY over the next session and over 5 sessions (SPY itself: closing up). Stored in `forecast_runs` and `forecasts` (migration 0005); `forecasts score` grades them with log loss against a coin, no-skill baselines and a pre-registered within-date shuffle test. A measuring instrument only: no order path reads it (`tests/test_forecast_architecture.py`). 2026-10-27: RBLX replaced EA, which was delisted on 2026-08-04 and could never be graded | [Code] |
 | Signals, `aegis/signals`, `aegis/data/apewisdom.py`, `aegis/store/signals.py` | shipped, off by default (`signals.enabled: false`). When on, the brain cycle gathers Alpaca News headlines (on) and ApeWisdom Reddit mention counts (off until checked live) about the watched tickers, stores every item with its provenance (`signal_fetches`, `signals`, migration 0006), dedupes, decays and ranks them, and shows the scan stage only a capped digest inside the untrusted-news block; each cycle's `signals_digest` event names the signals shown. No order path reads it (`tests/test_signals_architecture.py`), and the policy output is identical with signals on and off (`tests/test_signals_policy.py`). Design and measurement plan: `docs/signals/DESIGN.md` | [Code] |
+| Phone approval page, `aegis/approve_web`, `aegis/cli/approve_web.py` | shipped, off by default (`approve_web.enabled: false`). A stdlib server on 127.0.0.1 only, published to the owner's tailnet by `tailscale serve`, where the owner answers a NEEDS_APPROVAL verdict with a Tailscale login check, a PIN (scrypt hash in .env) and a one time form token. It only calls `dispatch.answer(..., channel="phone")`; the tick still re-checks and places. Approval alerts carry a ntfy Review button while it is on. Optional launchd job `local.aegis.approve-web` (`aegisctl.sh approve-web-install`). Design and setup: `docs/approve_web/` | [Code] |
 | Dashboard, `aegis/dashboard` | stub; Phase 8 not approved | [Code] |
 | Scheduler, `ops/launchd` | two launchd jobs on the Mac: a brain cycle at 10:00, 11:30, 13:30 and 15:00 New York time on weekdays (brain once, policy evaluate, orders tick, notify send), and an orders tick every 5 minutes in market hours. The 15:00 cycle also runs `forecasts run` once a day, after its trading steps. From 16:20 the after-close tick runs `notify summary` before `notify send`, so the day's summary goes out once. The market clock gates every step and anything but "open" runs nothing. Only existing CLI commands run; the policy engine still judges every proposal. | [Code] |
 | Scheduler daemon (Phase 9) | not built; the launchd jobs stand in for it | [Code] |
@@ -44,6 +45,7 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 - Tests pin both shipped defaults: `tests/test_config.py::test_shipped_broker_block_matches_the_code_defaults` and `tests/test_notify.py::TestConfig::test_shipped_block_is_the_code_defaults_and_off`.
 - `config.yaml` `forecast.enabled: false`, pinned by `tests/test_forecast_store.py::TestConfig::test_the_repo_ships_forecasts_off_on_a_thirty_name_universe`. `python -m aegis.cli.forecasts run` refuses while it is false. Turning it on, and scheduling it, are the owner's actions.
 - `config.yaml` `signals.enabled: false`, and `signals.sources.apewisdom.enabled: false` even when signals are on; pinned by `tests/test_signals.py::TestConfig::test_the_repo_ships_signals_off_with_free_sources_only`. Signals use no new key.
+- `config.yaml` `approve_web.enabled: false` (StrictBool), pinned by `tests/test_approve_web_cli.py::TestConfig::test_shipped_off_with_the_documented_values`. `approve-web serve` refuses while it is false; turning it on, Tailscale and the .env values are the owner's actions.
 - `.env` is gitignored; `.env.example` lists key names with empty values.
 - Turning broker or notifications on is the owner's action only (CLAUDE.md invariant 8).
 - On the Mac runtime the owner turned both on on 2026-10-22, as an uncommitted local edit to `config.yaml`; the shipped defaults stay off. With the launchd jobs loaded, the Mac now places AUTO_EXECUTE paper equity orders and sends notifications on its own. Options and other NEEDS_APPROVAL verdicts still wait for an approval. [Reported]
@@ -58,6 +60,7 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 - A bullish or bearish proposal's confidence is the probability that the underlying closes above (bullish) or below (bearish) its price at proposal time 5 trading sessions later (`aegis/brain/models.py`, `CONFIDENCE_HORIZON_SESSIONS`; prompts `thesis-v2`, `proposal-v2`). Neutral structures keep the older wording. `risk_limits.min_confidence` stays 0.5 and the rule is unchanged (owner decision, 2026-10-22). [Code] [Reported]
 - Per-ticker forecasts are graded on log loss against always saying 0.5, with the primary test fixed in advance: the primary arm's next-session relative forecasts against the same probabilities shuffled across tickers within each date (owner decision, 2026-10-22). [Reported]
 - GitHub main is the source of truth, Windows is the development machine, and the Mac is the paper runtime (owner decision, 2026-10-20). [Reported]
+- Approvals may also be answered on the phone approval page over Tailscale, with a login check, a PIN and a one time token; `dispatch.answer` accepts only the `cli` and `phone` channels (owner decision, 2026-11-04). [Reported]
 - This file is the single canonical status, written only through reviewed PRs (owner decision, 2026-10-20). [Reported]
 
 ## Environments
@@ -86,6 +89,7 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 | Linux (cloud), Python 3.14.6 | `python -m pytest -q` | signals PR head, merged with main at `242fe4e` | 6,003 | 1 | 0 | [Test] (source: Claude Code cloud session, 2026-11-02) |
 | Linux (cloud), Python 3.14.6 | `python -m pytest -q` | test-isolation PR head (on `fe4210a`) | 6,004 | 1 | 0 | [Test] (source: Claude Code cloud session, 2026-11-02); with `signals.enabled: true` in a local config.yaml, only the shipped-signals-default test fails |
 | Linux (cloud), Python 3.14.6 | `python -m pytest -q` | feed-chart PR head (on `525bb72`) | 6,037 | 1 | 0 | [Test] (source: Claude Code cloud session, 2026-11-04); baseline at `525bb72` 6,004 passed, 1 skipped |
+| Linux (cloud), Python 3.14.6 | `python -m pytest -q` | phone-approval PR head (on `b5c3dff`) | 6,225 | 1 | 0 | [Test] (source: Claude Code cloud session, 2026-11-04); baseline at `b5c3dff` 6,037 passed, 1 skipped |
 
 - The cloud skip is `tests/test_brain_architecture.py:1110` ("case-sensitive filesystem"), expected on Linux. [Test]
 - Main `1cadcc3` has the same tree as `d7149a1`, so these results apply to main unchanged. [Code]
@@ -112,7 +116,8 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 
 Merged pull requests, newest first (`git log --merges main`). Git history is the full record.
 
-- (this PR) feat: Discord feed shows longer theses, never exceeds 2,000 characters, and attaches a daily recap chart (adds matplotlib)
+- (this PR) feat: approve orders from the phone over Tailscale (approval page, off by default)
+- #31 feat: Discord feed shows longer theses, never exceeds 2,000 characters, and attaches a daily recap chart (adds matplotlib)
 - #29 test: keep tests offline and on the shipped signals block when a local config.yaml turns signals on
 - #27 feat: news and Reddit-mention signals for the scan stage, off by default
 - #26 feat: end-of-day iMessage summary from the after-close tick
