@@ -48,6 +48,7 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 - `config.yaml` `approve_web.enabled: false` (StrictBool), pinned by `tests/test_approve_web_cli.py::TestConfig::test_shipped_off_with_the_documented_values`. `approve-web serve` refuses while it is false; turning it on, Tailscale and the .env values are the owner's actions.
 - `.env` is gitignored; `.env.example` lists key names with empty values.
 - Turning broker or notifications on is the owner's action only (CLAUDE.md invariant 8).
+- On the Mac runtime the phone approval page was set up on 2026-11-04 with the owner's approval: Tailscale (Homebrew, user mode, its own LaunchAgent), `tailscale serve` to the tailnet only with Funnel off, the three `.env` values, `approve_web.enabled: true` as an uncommitted local edit, and the `local.aegis.approve-web` job loaded. A request with no Tailscale identity gets 403 on the mini. [Reported]
 - On the Mac runtime the owner turned both on on 2026-10-22, as an uncommitted local edit to `config.yaml`; the shipped defaults stay off. With the launchd jobs loaded, the Mac now places AUTO_EXECUTE paper equity orders and sends notifications on its own. Options and other NEEDS_APPROVAL verdicts still wait for an approval. [Reported]
 
 ## Approved decisions
@@ -116,7 +117,8 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 
 Merged pull requests, newest first (`git log --merges main`). Git history is the full record.
 
-- (this PR) fix: the after-close tick keeps retrying sends until 17:00
+- (this PR) docs: the phone approval setup as run on the mini (Homebrew Tailscale in user mode)
+- #30 fix: the after-close tick keeps retrying sends until 17:00
 - #32 feat: approve orders from the phone over Tailscale (approval page, off by default)
 - #31 feat: Discord feed shows longer theses, never exceeds 2,000 characters, and attaches a daily recap chart (adds matplotlib)
 - #29 test: keep tests offline and on the shipped signals block when a local config.yaml turns signals on
