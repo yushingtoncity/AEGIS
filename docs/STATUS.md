@@ -69,10 +69,11 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 | --- | --- | --- | --- |
 | GitHub main | source of truth | `5260f3b` | [Code] |
 | Windows dev | development | main at `1cadcc3` when this file was written | [Reported] |
-| Mac runtime | paper operations | `5260f3b`, launchd jobs loaded 2026-10-22 | [Reported] |
+| Mac runtime | paper operations | `6b80151`, launchd jobs loaded 2026-10-22; phone approval page turned on 2026-11-04 | [Reported] |
 
 - PR #15 changed only `CLAUDE.md` and two test files (`git diff --stat fff521a 1cadcc3`). [Code] So if the Mac is at `fff521a`, as reported, its runtime code is identical to main.
 - Backups and credential-file permissions were set up on 2026-10-20; details are kept private. [Reported]
+- Phone approval page on the Mac, 2026-11-04 (owner approved): Tailscale runs in user mode (Homebrew CLI, no root, no system extension) as the LaunchAgent `local.aegis.tailscaled`; `tailscale serve` publishes 127.0.0.1:8765 to the tailnet only, Funnel is off; the three `APPROVE_WEB_*` values are in `.env`; `approve_web.enabled: true` is an uncommitted local edit; `local.aegis.approve-web` is loaded. A request to 127.0.0.1:8765 without the identity header gets 403. Steps: `docs/approve_web/SETUP.md`. [Reported]
 
 ## Tests
 
@@ -90,6 +91,7 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 | Linux (cloud), Python 3.14.6 | `python -m pytest -q` | test-isolation PR head (on `fe4210a`) | 6,004 | 1 | 0 | [Test] (source: Claude Code cloud session, 2026-11-02); with `signals.enabled: true` in a local config.yaml, only the shipped-signals-default test fails |
 | Linux (cloud), Python 3.14.6 | `python -m pytest -q` | feed-chart PR head (on `525bb72`) | 6,037 | 1 | 0 | [Test] (source: Claude Code cloud session, 2026-11-04); baseline at `525bb72` 6,004 passed, 1 skipped |
 | Linux (cloud), Python 3.14.6 | `python -m pytest -q` | phone-approval PR head (on `b5c3dff`) | 6,225 | 1 | 0 | [Test] (source: Claude Code cloud session, 2026-11-04); baseline at `b5c3dff` 6,037 passed, 1 skipped |
+| Mac, Python 3.14.7 | `python -m pytest -q` with the Mac's local config.yaml | `6b80151` | 6,221 | 0 | 6 | [Test] (source: Claude Code session on the Mac, 2026-11-04); all 6 are shipped-default tests failing on the local flags (broker, forecast, notify, feed, signals on) |
 
 - The cloud skip is `tests/test_brain_architecture.py:1110` ("case-sensitive filesystem"), expected on Linux. [Test]
 - Main `1cadcc3` has the same tree as `d7149a1`, so these results apply to main unchanged. [Code]
@@ -116,7 +118,8 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 
 Merged pull requests, newest first (`git log --merges main`). Git history is the full record.
 
-- (this PR) fix: the after-close tick keeps retrying sends until 17:00
+- (this PR) docs: record the phone approval page going live on the Mac; user-mode Tailscale setup
+- #30 fix: the after-close tick keeps retrying sends until 17:00
 - #32 feat: approve orders from the phone over Tailscale (approval page, off by default)
 - #31 feat: Discord feed shows longer theses, never exceeds 2,000 characters, and attaches a daily recap chart (adds matplotlib)
 - #29 test: keep tests offline and on the shipped signals block when a local config.yaml turns signals on
