@@ -9,9 +9,8 @@ What it reads, all of it read-only:
 
 - the store's events for the day: ``cycle_start`` / ``cycle_end`` (each
   brain cycle and its outcome and cost), ``proposal``, ``approval_answered``,
-  ``order_submitted`` / ``order_updated``, ``forecast_end``, and every
-  warning or worse;
-- the day's policy verdicts, forecast runs, token usage and the controls;
+  ``order_submitted`` / ``order_updated``, and every warning or worse;
+- the day's policy verdicts, token usage and the controls;
 - the account state the caller read (equity, today's change, positions),
   or the reason it could not be read;
 - the launchd logs' lines for the day (``ops/launchd/aegis-run.sh`` writes
@@ -35,7 +34,6 @@ from zoneinfo import ZoneInfo
 from aegis.config import AegisConfig
 from aegis.data.models import AccountState
 from aegis.notify.models import BODY_MAX
-from aegis.store.forecasts import get_run_forecasts, get_runs_for_session
 from aegis.store.models import Event, EventLevel, Verdict
 from aegis.store.repo import (
     get_controls,
@@ -71,7 +69,7 @@ _SKIP_PROBLEMS = {
     "skipped: market clock unreadable": "the market clock could not be read",
 }
 # kinds the other lines already report, or that are not problems on their own
-_NOT_PROBLEMS = frozenset({"policy_reject", "cycle_end", "forecast_end", SUMMARY_KIND})
+_NOT_PROBLEMS = frozenset({"policy_reject", "cycle_end", SUMMARY_KIND})
 
 
 @dataclass(frozen=True)
@@ -310,25 +308,8 @@ def _account_line(account: AccountState | None, error: str | None) -> tuple[str,
     return line + ". " + ", ".join(shown) + (f", and {more} more" if more > 0 else ""), []
 
 
-def _forecasts_line(
-    conn: sqlite3.Connection, events: Sequence[Event], day: date, config: AegisConfig
-) -> tuple[str, list[str]]:
-    failed = [e for e in events if e.kind == "forecast_end" and _payload(e, "outcome") == "failed"]
-    problems = [f"a forecast run failed at {clock_time(e.occurred_at)}" for e in failed]
-    if not config.forecast.enabled:
-        return "Forecasts: off", problems
-    runs = get_runs_for_session(conn, day)
-    if not runs:
-        return "Forecasts: none ran", problems + ["the forecasts did not run"]
-    count = sum(len(found) for found in get_run_forecasts(conn, [run.id for run in runs]).values())
-    arms = ", ".join(run.arm.value for run in runs)
-    return f"Forecasts: {_plural(len(runs), 'run')} ({arms}), {_plural(count, 'forecast')}", problems
-
-
 def _cost_line(conn: sqlite3.Connection, events: Sequence[Event], day: date, config: AegisConfig) -> str:
-    costs = [
-        _payload(e, "estimated_cost_usd") for e in events if e.kind in ("cycle_end", "forecast_end")
-    ]
+    costs = [_payload(e, "estimated_cost_usd") for e in events if e.kind == "cycle_end"]
     if any(not isinstance(cost, (int, float)) for cost in costs):
         spend = "est. cost n/a"
     else:
@@ -389,14 +370,13 @@ def build_summary(
     cycles, cycle_problems = _cycles_line(events, config.notify.summary.expected_cycles)
     trades, trade_problems = _trades_line(conn, events, start, end)
     account_text, account_problems = _account_line(account, account_error)
-    forecasts, forecast_problems = _forecasts_line(conn, events, day, config)
     cost = _cost_line(conn, events, day, config)
     problems = (
-        _control_problems(conn, now) + cycle_problems + trade_problems + forecast_problems
+        _control_problems(conn, now) + cycle_problems + trade_problems
         + _event_problems(events) + account_problems
         + (_log_problems(log_lines) if log_lines is not None else ["the launchd logs were not found"])
     )
-    lines = [heading, cycles, trades, account_text, forecasts, cost]
+    lines = [heading, cycles, trades, account_text, cost]
     if not problems:
         lines.append("Problems: none")
     else:

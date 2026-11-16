@@ -117,27 +117,19 @@ def test_a_cycle_judges_the_proposal_its_brain_run_printed_then_ticks_and_notifi
     assert "SPY (equity)" in log(box, "cycle")
 
 
-def test_the_15_00_cycle_makes_the_days_forecasts_after_the_trading_steps(box: Path) -> None:
-    assert run(box, "cycle", brain=NO_TRADE, ny_clock="3 1500").returncode == 0
-    assert calls(box) == [
-        "aegis.cli.brain once",
-        "aegis.cli.orders tick",
-        "aegis.cli.notify send",
-        "aegis.cli.notify feed-send --if-enabled",
-        "aegis.cli.forecasts run",
-    ]
-    assert "exit 0: aegis.cli.forecasts run" in log(box, "cycle")
+@pytest.mark.parametrize("ny_clock", ["3 1000", "3 1130", "3 1330", "3 1500", "3 1530"])
+def test_no_cycle_makes_forecasts(box: Path, ny_clock: str) -> None:
+    # The scheduled forecast step was removed (owner decision, 2026-11-16): the
+    # 15:00 cycle runs the same trading steps as every other cycle and nothing more.
+    assert run(box, "cycle", brain=NO_TRADE, ny_clock=ny_clock).returncode == 0
+    assert calls(box) == ["aegis.cli.brain once", "aegis.cli.orders tick", "aegis.cli.notify send", FEED]
+    assert "aegis.cli.forecasts" not in log(box, "cycle")
 
 
-@pytest.mark.parametrize("ny_clock", ["3 1000", "3 1130", "3 1330", "3 1459", "3 1600"])
-def test_no_other_cycle_makes_forecasts(box: Path, ny_clock: str) -> None:
-    run(box, "cycle", brain=NO_TRADE, ny_clock=ny_clock)
-    assert "aegis.cli.forecasts run" not in calls(box)
-
-
-def test_a_closed_market_makes_no_forecasts_either(box: Path) -> None:
-    run(box, "cycle", market="closed", ny_clock="3 1500")
-    assert calls(box) == []
+@pytest.mark.parametrize("ny_clock", ["3 1000", "3 1500", "3 1625"])
+def test_no_tick_makes_forecasts(box: Path, ny_clock: str) -> None:
+    run(box, "tick", market="closed" if ny_clock >= "3 1600" else "open", ny_clock=ny_clock)
+    assert not any(call.startswith("aegis.cli.forecasts") for call in calls(box))
 
 
 def test_a_cycle_without_a_proposal_judges_nothing(box: Path) -> None:
