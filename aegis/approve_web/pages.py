@@ -49,7 +49,7 @@ def page(title: str, body: str) -> str:
     return (
         "<!doctype html><html lang=en><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
-        f"<meta name=referrer content=no-referrer><title>{escape(title)}</title>"
+        f"<meta name=referrer content=same-origin><title>{escape(title)}</title>"
         f"<style>{_STYLE}</style></head><body><main>{body}</main></body></html>"
     )
 

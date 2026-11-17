@@ -35,7 +35,7 @@ ntfy.sh is a public relay: anyone who learns the topic reads every alert, decisi
 
 A POST must also:
 
-4. Come from the page itself: an `Origin` header, when present, equals the page's origin, and `Sec-Fetch-Site`, when present, is `same-origin` or `none`.
+4. Come from the page itself: an `Origin` header, when present, equals the page's origin, and `Sec-Fetch-Site`, when present, is `same-origin` or `none`. `Origin: null` passes only together with `Sec-Fetch-Site: same-origin`, which only the browser can set. The page sends `Referrer-Policy: same-origin` so browsers send its real origin on its own form; the first version sent `no-referrer`, which makes browsers send `Origin: null` on a POST, and every answer was refused until the fix of 2026-11-17.
 5. Be `application/x-www-form-urlencoded`, at most 2,048 bytes, each field once.
 6. Redeem a one time form token. A token is issued on each GET of a decision page, bound to that decision, held only in memory, dies after `approve_web.form_ttl_seconds` (300), and is gone after its first use, right or wrong.
 7. Find the page not locked: fewer than `approve_web.max_pin_failures` (5) wrong PINs in a row. A good phone answer or `approve-web unlock` resets the count.
