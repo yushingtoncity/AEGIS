@@ -93,6 +93,7 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 | Linux (cloud), Python 3.14.6 | `python -m pytest -q` | feed-chart PR head (on `525bb72`) | 6,037 | 1 | 0 | [Test] (source: Claude Code cloud session, 2026-11-04); baseline at `525bb72` 6,004 passed, 1 skipped |
 | Linux (cloud), Python 3.14.6 | `python -m pytest -q` | phone-approval PR head (on `b5c3dff`) | 6,225 | 1 | 0 | [Test] (source: Claude Code cloud session, 2026-11-04); baseline at `b5c3dff` 6,037 passed, 1 skipped |
 | Linux (cloud), Python 3.14.6 | `python -m pytest -q` | forecast-removal PR head (on `5c58d01`) | 6,227 | 1 | 0 | [Test] (source: Claude Code cloud session, 2026-11-16); baseline at `5c58d01` 6,226 passed, 1 skipped |
+| Linux (cloud), Python 3.14.6 | `python -m pytest -q` | approval-page origin fix PR head (on `c48112a`) | 6,235 | 1 | 0 | [Test] (source: Claude Code cloud session, 2026-11-17); baseline at `c48112a` 6,227 passed, 1 skipped |
 | Mac, Python 3.14.7 | `python -m pytest -q` with the Mac's local config.yaml | `6b80151` | 6,221 | 0 | 6 | [Test] (source: Claude Code session on the Mac, 2026-11-04); all 6 are shipped-default tests failing on the local flags (broker, forecast, notify, feed, signals on) |
 
 - The cloud skip is `tests/test_brain_architecture.py:1110` ("case-sensitive filesystem"), expected on Linux. [Test]
@@ -120,7 +121,8 @@ AEGIS is an agentic trading platform on an Alpaca paper account. The LLM propose
 
 Merged pull requests, newest first (`git log --merges main`). Git history is the full record.
 
-- (this PR) fix: stop running forecasts from the 15:00 cycle and drop them from the day summary
+- (this PR) fix: the phone approval page accepts its own form again (Referrer-Policy same-origin; Origin null only with Sec-Fetch-Site same-origin)
+- #35 fix: stop running forecasts from the 15:00 cycle and drop them from the day summary
 - #34 docs: record the phone approval page going live on the Mac; user-mode Tailscale setup
 - #30 fix: the after-close tick keeps retrying sends until 17:00
 - #32 feat: approve orders from the phone over Tailscale (approval page, off by default)

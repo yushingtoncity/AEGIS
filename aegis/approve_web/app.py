@@ -53,7 +53,7 @@ SECURITY_HEADERS: dict[str, str] = {
     " form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
     "X-Frame-Options": "DENY",
     "X-Content-Type-Options": "nosniff",
-    "Referrer-Policy": "no-referrer",
+    "Referrer-Policy": "same-origin",  # no-referrer makes a POST carry Origin: null
     "Cache-Control": "no-store",
 }
 
@@ -213,11 +213,24 @@ class App:
     # --- answering ----------------------------------------------------------------
 
     def _same_origin(self, request: Request) -> bool:
+        """The form came from this page, not from another site.
+
+        A real ``Origin`` must be the page's own. ``Origin: null`` (sent by a
+        browser that hides where a request came from) passes only when the
+        browser itself says ``Sec-Fetch-Site: same-origin``; a page on another
+        site cannot set either header. Any other ``Sec-Fetch-Site`` than
+        ``same-origin`` or ``none`` is refused.
+        """
         origin = request.header("Origin")
-        if origin is not None and origin.strip().lower() != self._settings.page_url.lower():
-            return False
         site = request.header("Sec-Fetch-Site")
-        return site is None or site.strip().lower() in ("same-origin", "none")
+        site = site.strip().lower() if site is not None else None
+        if origin is not None:
+            origin = origin.strip().lower()
+            if origin == "null":
+                return site == "same-origin"
+            if origin != self._settings.page_url.lower():
+                return False
+        return site is None or site in ("same-origin", "none")
 
     def _form(self, request: Request) -> dict[str, str] | None:
         kind = (request.header("Content-Type") or "").split(";")[0].strip().lower()

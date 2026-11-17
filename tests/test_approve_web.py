@@ -342,12 +342,52 @@ class TestAnswering:
     @pytest.mark.parametrize("headers", [
         {"Origin": "https://evil.example.com"},
         {"Sec-Fetch-Site": "cross-site"},
+        {"Sec-Fetch-Site": "same-site"},
     ])
     def test_a_cross_site_post_is_refused(self, app, db, decision, headers):
         token = _token(app, decision.id)
         sent = _headers(**{"Content-Type": "application/x-www-form-urlencoded", **headers})
         assert _post(app, decision.id, token=token, headers=sent).status == 400
         assert _approval(db, decision.id) is None
+
+    def test_a_same_origin_post_with_a_null_origin_is_accepted(self, app, db, decision):
+        # Regression: a no-referrer policy made phone browsers send Origin: null on
+        # the page's own form, and every answer was refused. The browser's own
+        # Sec-Fetch-Site: same-origin vouches for the request instead.
+        token = _token(app, decision.id)
+        sent = _headers(**{"Content-Type": "application/x-www-form-urlencoded",
+                           "Origin": "null", "Sec-Fetch-Site": "same-origin"})
+        response = _post(app, decision.id, token=token, headers=sent)
+        assert response.status == 200 and "Approved" in response.html
+        assert _approval(db, decision.id).response is ApprovalResponse.APPROVED
+
+    @pytest.mark.parametrize("site", [None, "none", "same-site", "cross-site"])
+    def test_a_null_origin_without_same_origin_fetch_metadata_is_refused(
+        self, app, db, decision, site
+    ):
+        token = _token(app, decision.id)
+        extra = {"Content-Type": "application/x-www-form-urlencoded", "Origin": "null"}
+        if site is not None:
+            extra["Sec-Fetch-Site"] = site
+        assert _post(app, decision.id, token=token, headers=_headers(**extra)).status == 400
+        assert _approval(db, decision.id) is None
+
+    def test_a_foreign_origin_is_refused_even_when_fetch_metadata_says_same_origin(
+        self, app, db, decision
+    ):
+        token = _token(app, decision.id)
+        sent = _headers(**{"Content-Type": "application/x-www-form-urlencoded",
+                           "Origin": "https://evil.example.com", "Sec-Fetch-Site": "same-origin"})
+        assert _post(app, decision.id, token=token, headers=sent).status == 400
+        assert _approval(db, decision.id) is None
+
+    def test_the_page_lets_the_browser_send_its_own_origin(self, app):
+        # no-referrer turns the Origin of a POST into "null"; same-origin keeps it
+        # for the page's own form and still sends nothing to other sites.
+        response = _get(app, "/")
+        assert response.headers["Referrer-Policy"] == "same-origin"
+        assert "<meta name=referrer content=same-origin>" in response.html
+        assert "no-referrer" not in response.html
 
     def test_a_post_without_identity_writes_nothing(self, app, db, decision):
         token = _token(app, decision.id)
