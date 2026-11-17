@@ -1,6 +1,6 @@
 """The end-of-day summary (``aegis.notify.summary``) and ``notify summary``.
 
-Stores are tmp_path files seeded with events, verdicts and forecast runs;
+Stores are tmp_path files seeded with events and verdicts;
 the account is a stand-in AccountState with made-up figures and no account
 number; the launchd logs are written by the test. Nothing reaches a broker,
 Anthropic or Messages.
@@ -13,7 +13,7 @@ from datetime import date, datetime, time, timezone
 import pytest
 
 from aegis.cli import notify as cli
-from aegis.config import AegisConfig, ForecastConfig, NotifyConfig
+from aegis.config import AegisConfig, NotifyConfig
 from aegis.data.models import AccountState, Position
 from aegis.notify.models import BODY_MAX
 from aegis.notify.outbox import notice_for, wanted
@@ -27,10 +27,8 @@ from aegis.notify.summary import (
     summary_event,
 )
 from aegis.store import Event, EventLevel, get_events_since, log_event, open_store
-from aegis.store.forecasts import insert_forecast_run
-from aegis.store.models import ForecastArm, PolicyDecision, Proposal, Verdict
+from aegis.store.models import PolicyDecision, Proposal, Verdict
 from aegis.store.repo import insert_proposal, record_decision, set_kill_switch
-from forecast_factories import make_run, record
 
 DAY = date(2026, 10, 28)  # a Wednesday
 CYCLES = ((10, 0), (11, 30), (13, 30), (15, 0))
@@ -47,7 +45,6 @@ def _config(**notify) -> AegisConfig:
     return AegisConfig(
         watchlist=["SPY"],
         notify=NotifyConfig(enabled=True, **notify),
-        forecast=ForecastConfig(enabled=True, universe=["AAPL", "MSFT"]),
     )
 
 
@@ -76,11 +73,6 @@ def _cycle(conn, hour: int, minute: int, outcome: str = "no_trade", cost: float 
 def _quiet_day(conn) -> None:
     for hour, minute in CYCLES:
         _cycle(conn, hour, minute)
-    insert_forecast_run(conn, make_run("p", anchor=DAY), [record("p", "AAPL", 0.6), record("p", "MSFT", 0.4)])
-    insert_forecast_run(conn, make_run("s", anchor=DAY, arm=ForecastArm.SHADOW),
-                        [record("s", "AAPL", 0.5), record("s", "MSFT", 0.5)])
-    log_event(conn, Event(occurred_at=at(15, 3), level=EventLevel.INFO, kind="forecast_end",
-                          message="ok", payload={"outcome": "written", "estimated_cost_usd": 0.10}))
 
 
 CLEAN_LOGS = [
@@ -114,8 +106,7 @@ def test_a_quiet_day(conn):
         "Cycles: 4 of 4 ran, all no trade",
         "Trades: none",
         "Account: equity $100,512.40, up $34.40 today. SPY 1 (up $12.00)",
-        "Forecasts: 2 runs (primary, shadow), 4 forecasts",
-        "Claude: est. $0.26, 0 tokens (0% of the daily budget)",
+        "Claude: est. $0.16, 0 tokens (0% of the daily budget)",
         "Problems: none",
     ]
     assert summary.problems == 0
@@ -145,8 +136,6 @@ def test_a_bad_day_lists_its_problems(conn, tmp_path):
     _cycle(conn, 11, 30, outcome="failed", cost=None)
     _cycle(conn, 13, 30, outcome="")
     log_event(conn, Event(occurred_at=at(11, 31), level=EventLevel.ERROR, kind="brain_error", message="boom"))
-    log_event(conn, Event(occurred_at=at(15, 1), level=EventLevel.ERROR, kind="forecast_end",
-                          message="failed", payload={"outcome": "failed"}))
     set_kill_switch(conn, True)
     logs = CLEAN_LOGS + [
         "2026-10-28 14:05:02 EDT [tick] exit 1: aegis.cli.orders tick",
@@ -158,18 +147,17 @@ def test_a_bad_day_lists_its_problems(conn, tmp_path):
     summary = _build(conn, logs=logs, config=_config(summary={"expected_cycles": 4}))
     lines = summary.text.splitlines()
     assert "Cycles: 3 of 4 ran. 10:00 am no trade, 11:30 am FAILED, 1:30 pm never finished" in lines
-    assert "Forecasts: none ran" in lines
     assert "Claude: est. cost n/a" in summary.text
-    assert lines[lines.index("Problems (9):") + 1:] == [
+    assert lines[lines.index("Problems (7):") + 1:] == [
         "- the kill switch is ON",
         "- only 3 of 4 brain cycles ran",
         "- the 1:30 pm cycle never finished",
-        "- a forecast run failed at 3:01 pm",
-        "- the forecasts did not run",
         "- brain_error at 11:31 am",
-        "- and 3 more (python -m aegis.cli.trace)",
+        "- aegis.cli.orders tick exited 1 2 times, first at 2:05 pm",
+        "- a step was skipped because another was still running",
+        "- and 1 more (python -m aegis.cli.trace)",
     ]
-    assert summary.problems == 9
+    assert summary.problems == 7
 
 
 def test_the_log_problems_read_as_sentences(conn):
@@ -178,13 +166,13 @@ def test_the_log_problems_read_as_sentences(conn):
         "2026-10-28 14:05:02 EDT [tick] exit 1: aegis.cli.orders tick",
         "2026-10-28 14:10:02 EDT [tick] exit 1: aegis.cli.orders tick",
         "2026-10-28 14:15:00 EDT [tick] skipped: busy (another AEGIS step holds /x/run.lock)",
-        "2026-10-28 15:02:00 EDT [cycle] exit 2: aegis.cli.forecasts run",
+        "2026-10-28 15:02:00 EDT [cycle] exit 2: aegis.cli.notify send",
         "aegis output that happens to say exit 1: in the middle",
     ]
     lines = _build(conn, logs=logs).text.splitlines()
     assert lines[-3:] == [
         "- aegis.cli.orders tick exited 1 2 times, first at 2:05 pm",
-        "- aegis.cli.forecasts run exited 2 at 3:02 pm",
+        "- aegis.cli.notify send exited 2 at 3:02 pm",
         "- a step was skipped because another was still running",
     ]
 
@@ -223,11 +211,16 @@ def test_no_positions(conn):
         conn, account=_account(positions=[], last_equity=100_512.40)).text
 
 
-def test_forecasts_off_is_not_a_problem(conn):
+def test_the_summary_says_nothing_about_forecasts(conn):
+    # The forecast step was removed from the schedule (2026-11-16), so the
+    # summary neither reports forecasts nor flags their absence, whatever
+    # forecast.enabled says.
     _quiet_day(conn)
-    config = AegisConfig(watchlist=["SPY"], notify=NotifyConfig(enabled=True))
-    text = _build(conn, config=config).text
-    assert "Forecasts: off" in text and "Problems: none" in text
+    for enabled in (False, True):
+        config = AegisConfig(watchlist=["SPY"], notify=NotifyConfig(enabled=True),
+                             forecast={"enabled": enabled})
+        text = _build(conn, config=config).text
+        assert "forecast" not in text.lower() and "Problems: none" in text
 
 
 def test_missing_logs_are_a_problem(conn, tmp_path):
