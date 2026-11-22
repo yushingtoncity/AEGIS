@@ -1,0 +1,76 @@
+# Offline model bakeoff (bakeoff/README.md). The live cycle never reads this
+# file; config.yaml stays the only production config. Validated by
+# bakeoff/config.py.
+
+# Hard stop for the whole run, critic included, in USD. Before every call the
+# runner projects its worst case (estimated input tokens plus the call's full
+# output cap) and aborts if that would cross the cap; after every call it
+# aborts once the real spend reaches it.
+spend_cap_usd: 5.00
+
+# Seeds the blind grading sample and the A/B/C shuffle, so a report can be
+# regenerated identically.
+seed: 20261122
+
+# Inputs in the blind grading CSV (all inputs when fewer exist).
+blind_sample_size: 20
+
+# Per call wall clock limit. Gemini at thinking level high can take minutes.
+timeout_seconds: 300
+
+# Abort the run when one contestant fails this many calls in a row with a
+# non retryable error: a rejected schema or a bad model id would otherwise
+# fail every call the same way.
+max_consecutive_errors: 3
+
+# Retry with exponential backoff on rate limits (HTTP 429) and overload
+# (Anthropic 529, Gemini 503). A server supplied retry-after wins, capped by
+# backoff_max_seconds.
+retry:
+  max_attempts: 5
+  backoff_base_seconds: 2.0
+  backoff_max_seconds: 60.0
+
+contestants:
+  # The thesis stage exactly as config.yaml configures it today: model,
+  # track (resolved to the newest model of the family at run time, as the
+  # live cycle does), effort and max_tokens are all read from
+  # brain.stages.thesis. Nothing is set here so nothing can drift.
+  - name: baseline
+    provider: anthropic
+    from_brain_stage: thesis
+
+  # Gemini output caps include room for thinking. 16,000 is a placeholder
+  # chosen so medium and high thinking do not truncate a five candidate
+  # answer; lower it once real usage is measured.
+  - name: neon-medium
+    provider: gemini
+    model: gemini-4-neon
+    thinking_level: medium
+    max_output_tokens: 16000
+
+  - name: neon-high
+    provider: gemini
+    model: gemini-4-neon
+    thinking_level: high
+    max_output_tokens: 16000
+
+# The shadow critic: reviews every baseline candidate and logs a verdict.
+# It never alters, approves or blocks anything.
+critic:
+  name: neon-critic
+  provider: gemini
+  model: gemini-4-neon
+  thinking_level: medium
+  max_output_tokens: 8000
+
+# USD per million tokens. YOU MUST VERIFY THESE against each provider's
+# pricing page before a run; they are used for the spend cap and the cost
+# columns. Gemini bills thinking tokens at the output price. A null price
+# makes the preflight refuse to run, because the spend cap cannot be
+# enforced without it.
+prices_per_mtok:
+  gemini-4-neon: {input: 3.00, output: 15.00}
+  # Claude: fill in. The key must be the model the baseline resolves to at
+  # run time (the preflight prints it), e.g. claude-opus-5-5.
+  claude-opus-5-5: {input: null, output: null}

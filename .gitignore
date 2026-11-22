@@ -16,3 +16,8 @@ __pycache__/
 
 # Tooling
 .pytest_cache/
+
+# Offline model bakeoff: datasets hold account figures and positions from the
+# audit log, results hold model outputs. Private; never commit them.
+bakeoff/data/
+bakeoff/out/
