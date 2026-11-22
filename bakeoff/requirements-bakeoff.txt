@@ -1,0 +1,5 @@
+# Optional, for the offline model bakeoff only (bakeoff/README.md). Not a
+# production dependency: the live cycle never imports it, and the test suite
+# runs without it (the Gemini provider imports it lazily; tests use fakes).
+#   pip install -r requirements.txt -r bakeoff/requirements-bakeoff.txt
+google-genai>=2.32,<3
